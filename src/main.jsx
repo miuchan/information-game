@@ -709,10 +709,12 @@ function stepWorld(world, options, scenarioId) {
         node.accuracyStreak = (node.accuracyStreak || 0) + 1;
         rewarded += 1;
       }
-      if (saidFalse && (!options.anonymous || options.factCheck)) {
-        node.reputation = clamp(node.reputation - (node.attention >= 3 ? 2 : 1), 0, 9);
+      if (saidFalse) {
         node.accuracyStreak = 0;
-        punished += 1;
+        if (!options.anonymous || options.factCheck) {
+          node.reputation = clamp(node.reputation - (node.attention >= 3 ? 2 : 1), 0, 9);
+          punished += 1;
+        }
       }
       if (!saidTruth && !saidFalse && node.message === 0) node.accuracyStreak = 0;
       if ((node.accuracyStreak || 0) >= 3 && node.type !== 'bot') {
