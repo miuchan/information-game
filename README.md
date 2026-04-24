@@ -93,6 +93,8 @@ if s_i = 0: b_i -= 1
 b_i = clip(b_i, -2, 2)
 ```
 
+In the current tuning, private signals are intentionally stronger than before (higher rate and accuracy), and fact-check reveal rounds inject an additional truth push into a subset of nodes. This makes reality feedback persistent enough to challenge pure social herding.
+
 The hidden truth gives the simulation an informational backbone. Without it, the system would only simulate factional alignment.
 
 ## Network Structure
@@ -165,7 +167,7 @@ b_i' = clip(b_i + P_i + C_i + A_i, -2, 2)
 | `C_i` | local consensus pressure |
 | `A_i` | attention or extremity pressure |
 
-Different agent types use different thresholds before accepting pressure.
+Different agent types use different thresholds before accepting pressure. Nodes also keep a short evidence memory that accumulates private truth pressure. When accumulated evidence is strong enough, nodes temporarily ignore social pressure and follow evidence direction instead.
 
 ### 5. Action Choice
 
@@ -193,7 +195,9 @@ Every few ticks, partial outcomes are revealed.
 - strong speech spends energy
 - attention and accuracy can restore energy
 
-This creates a tension between short-term attention and long-run credibility.
+This creates a tension between short-term attention and long-run credibility. Reputation visibility now has a lower baseline weight and a steeper dependence on reputation, so repeatedly penalized nodes lose much more practical influence.
+
+A small skepticism/forgetting mechanism is also present: agents at extreme certainty can occasionally step back by one belief level, reducing irreversible lock-in.
 
 ## Player Controls
 

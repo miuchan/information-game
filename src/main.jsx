@@ -530,6 +530,7 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
         lastFlip: 0,
         attention: 0,
         checked: false,
+        evidenceMemory: 0,
       });
     }
   }
@@ -566,12 +567,12 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
 
 function scenarioSettings(id) {
   return {
-    scarce: { signalRate: 0.018, signalAccuracy: 0.68, attentionBoost: 1 },
-    polarized: { signalRate: 0.026, signalAccuracy: 0.66, attentionBoost: 1 },
-    anonymous: { signalRate: 0.025, signalAccuracy: 0.64, attentionBoost: 1.15 },
-    viral: { signalRate: 0.022, signalAccuracy: 0.62, attentionBoost: 1.7 },
-    bridge: { signalRate: 0.024, signalAccuracy: 0.65, attentionBoost: 1.25 },
-    market: { signalRate: 0.022, signalAccuracy: 0.63, attentionBoost: 1.45 },
+    scarce: { signalRate: 0.05, signalAccuracy: 0.76, attentionBoost: 1 },
+    polarized: { signalRate: 0.046, signalAccuracy: 0.74, attentionBoost: 1 },
+    anonymous: { signalRate: 0.044, signalAccuracy: 0.73, attentionBoost: 1.15 },
+    viral: { signalRate: 0.04, signalAccuracy: 0.72, attentionBoost: 1.7 },
+    bridge: { signalRate: 0.045, signalAccuracy: 0.74, attentionBoost: 1.25 },
+    market: { signalRate: 0.041, signalAccuracy: 0.72, attentionBoost: 1.45 },
   }[id];
 }
 
@@ -602,8 +603,7 @@ function pressureFor(node, oldNodes, neighbors, options) {
   neighbors[node.id].forEach((ni) => {
     const other = oldNodes[ni];
     if (other.message === 0) return;
-    let weight = 1;
-    if (options.showReputation) weight += other.reputation * 0.22;
+    let weight = options.showReputation ? 0.2 + other.reputation * 0.25 : 1;
     if (options.hotRanking) weight += Math.min(2.4, other.attention * 0.18);
     if (node.filter === 0 && other.reputation >= 4) weight += 0.7;
     if (node.filter === 1 && other.community === node.community) weight += 0.8;
@@ -632,6 +632,9 @@ function stepWorld(world, options, scenarioId) {
     message: generateMessage(node, oldNodes, neighbors, options, rng),
   }));
 
+  const revealTick = (world.tick + 1) % 5 === 0;
+  const truthPush = world.truth === 1 ? 1 : -1;
+
   const nodes = messaged.map((node) => {
     let privatePush = 0;
     const rate = node.type === 'checker' ? settings.signalRate * 8 : settings.signalRate;
@@ -640,6 +643,12 @@ function stepWorld(world, options, scenarioId) {
       const signal = rng() < accuracy ? world.truth : 1 - world.truth;
       privatePush = signal === 1 ? 1 : -1;
     }
+
+    if (options.factCheck && node.checked) privatePush += truthPush;
+    if (options.factCheck && revealTick && (node.checked || rng() < 0.28)) privatePush += truthPush;
+
+    let evidenceMemory = clamp((node.evidenceMemory || 0) + privatePush, -5, 5);
+    if (privatePush === 0 && evidenceMemory !== 0 && rng() < 0.08) evidenceMemory -= sign(evidenceMemory);
 
     const pressure = pressureFor(node, messaged, neighbors, options);
     let threshold = 1.2;
@@ -651,11 +660,16 @@ function stepWorld(world, options, scenarioId) {
     if (node.type === 'bot') threshold = 9;
 
     let socialPush = Math.abs(pressure) >= threshold ? sign(pressure) : 0;
+    if (Math.abs(evidenceMemory) >= 3) {
+      socialPush = 0;
+      privatePush = sign(evidenceMemory);
+    }
     if (node.type === 'stubborn' && socialPush !== sign(node.belief)) socialPush = 0;
-    if (options.factCheck && node.checked) privatePush += world.truth === 1 ? 1 : -1;
 
     const attentionPush = options.hotRanking && node.type === 'attention' && Math.abs(pressure) > 2.6 ? sign(pressure) : 0;
-    const nextBelief = clamp(node.belief + privatePush + socialPush + attentionPush, -2, 2);
+    let nextBelief = clamp(node.belief + privatePush + socialPush + attentionPush, -2, 2);
+    if (Math.abs(nextBelief) === 2 && rng() < 0.005) nextBelief -= sign(nextBelief);
+
     const nextAction = nextBelief >= 1 ? 1 : nextBelief <= -1 ? 0 : node.action;
     const spent = node.message === 0 ? 0 : node.type === 'attention' || node.type === 'agitator' ? 2 : 1;
     const attention = Math.max(0, Math.round(Math.abs(pressure) + (node.message !== 0 ? 1 : 0)));
@@ -666,10 +680,11 @@ function stepWorld(world, options, scenarioId) {
       lastFlip: sign(nextBelief) !== sign(node.prevBelief) ? world.tick + 1 : node.lastFlip,
       energy: clamp(node.energy - spent + (attention >= 3 ? 1 : 0), 0, 9),
       attention,
+      evidenceMemory,
     };
   });
 
-  if ((world.tick + 1) % 5 === 0) {
+  if (revealTick) {
     let rewarded = 0;
     let punished = 0;
     nodes.forEach((node) => {
