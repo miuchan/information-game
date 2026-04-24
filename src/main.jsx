@@ -825,15 +825,6 @@ function CellCanvas({ world, selected, onSelect }) {
       }
     });
 
-    ctx.strokeStyle = 'rgba(16,19,22,.65)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(widthPx / 2, 0);
-    ctx.lineTo(widthPx / 2, heightPx);
-    ctx.moveTo(0, heightPx / 2);
-    ctx.lineTo(widthPx, heightPx / 2);
-    ctx.stroke();
-
     if (selected !== null) {
       const node = world.nodes[selected];
       ctx.strokeStyle = '#ffffff';
