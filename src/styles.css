@@ -698,7 +698,7 @@ input[type="range"] {
 
   .left-hud-panel {
     left: auto;
-    margin: 0 auto 10px;
+    margin: 10px auto;
     max-height: none;
     max-width: 760px;
     overflow: visible;
