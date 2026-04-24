@@ -205,6 +205,13 @@ h3 {
   width: 42px;
 }
 
+.ui-toggle-button {
+  position: fixed;
+  right: 18px;
+  top: 18px;
+  z-index: 4;
+}
+
 .text-button {
   gap: 7px;
   min-height: 42px;

@@ -963,6 +963,7 @@ function TheoryModal({ copy, onClose }) {
 function App() {
   const [locale, setLocale] = useState('en');
   const [showTheory, setShowTheory] = useState(false);
+  const [hideControls, setHideControls] = useState(false);
   const [scenario, setScenario] = useState('scarce');
   const [dimensions, setDimensions] = useState(() => viewportGrid());
   const [world, setWorld] = useState(() => createWorld(Date.now(), 'scarce', viewportGrid()));
@@ -982,6 +983,7 @@ function App() {
   const selectedNode = selected === null ? null : world.nodes[selected];
   const copy = COPY[locale];
   const eventText = getEventText(world.event, copy);
+  const controlsToggleTitle = hideControls ? 'Show controls' : 'Hide controls';
 
   useEffect(() => {
     let resizeTimer = null;
@@ -1029,68 +1031,80 @@ function App() {
   return (
     <main className="app-shell">
       <CellCanvas world={world} selected={selected} onSelect={setSelected} />
-      <section className="board-panel">
-        <header className="topbar">
-          <div>
-            <p className="eyebrow">{copy.meta.eyebrow}</p>
-            <h1>{copy.meta.title}</h1>
-          </div>
-          <div className="top-actions">
-            <button className="text-button" onClick={() => setShowTheory(true)} type="button">
-              <BookOpen size={17} />
-              <span>{copy.meta.theory}</span>
-            </button>
-            <a className="icon-button" href="https://github.com/miuchan/information-game" target="_blank" rel="noreferrer" title="GitHub" aria-label="GitHub repository">
-              <FaGithub size={18} />
-            </a>
-            <label className="language-select" title={copy.meta.language}>
-              <Languages size={17} />
-              <select value={locale} onChange={(event) => setLocale(event.target.value)} aria-label={copy.meta.language}>
-                {LANGUAGES.map((language) => (
-                  <option key={language.code} value={language.code}>
-                    {language.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button className="icon-button primary" onClick={() => setRunning((v) => !v)} type="button" title={running ? copy.meta.pause : copy.meta.run}>
-              {running ? <Pause size={19} /> : <Play size={19} />}
-            </button>
-            <button className="icon-button" onClick={() => setWorld((current) => stepWorld(current, options, scenario))} type="button" title={copy.meta.step}>
-              <FastForward size={18} />
-            </button>
-            <button className="icon-button" onClick={() => reset()} type="button" title={copy.meta.reset}>
-              <RefreshCcw size={18} />
-            </button>
-          </div>
-        </header>
+      <button
+        className="icon-button ui-toggle-button"
+        onClick={() => setHideControls((value) => !value)}
+        type="button"
+        title={controlsToggleTitle}
+        aria-label={controlsToggleTitle}
+      >
+        {hideControls ? <Eye size={18} /> : <EyeOff size={18} />}
+      </button>
 
-        <div className="truth-strip">
-          <div>
-            <Target size={18} />
-            <span>{copy.strip.truth} {world.truth}</span>
-          </div>
-          <div>
-            <Activity size={18} />
-            <span>{copy.strip.tick} {world.tick}</span>
-          </div>
-          <div>
-            <Zap size={18} />
-            <span>{copy.strip.score} {score}</span>
-          </div>
-        </div>
+      {!hideControls ? (
+        <>
+          <section className="board-panel">
+            <header className="topbar">
+              <div>
+                <p className="eyebrow">{copy.meta.eyebrow}</p>
+                <h1>{copy.meta.title}</h1>
+              </div>
+              <div className="top-actions">
+                <button className="text-button" onClick={() => setShowTheory(true)} type="button">
+                  <BookOpen size={17} />
+                  <span>{copy.meta.theory}</span>
+                </button>
+                <a className="icon-button" href="https://github.com/miuchan/information-game" target="_blank" rel="noreferrer" title="GitHub" aria-label="GitHub repository">
+                  <FaGithub size={18} />
+                </a>
+                <label className="language-select" title={copy.meta.language}>
+                  <Languages size={17} />
+                  <select value={locale} onChange={(event) => setLocale(event.target.value)} aria-label={copy.meta.language}>
+                    {LANGUAGES.map((language) => (
+                      <option key={language.code} value={language.code}>
+                        {language.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button className="icon-button primary" onClick={() => setRunning((v) => !v)} type="button" title={running ? copy.meta.pause : copy.meta.run}>
+                  {running ? <Pause size={19} /> : <Play size={19} />}
+                </button>
+                <button className="icon-button" onClick={() => setWorld((current) => stepWorld(current, options, scenario))} type="button" title={copy.meta.step}>
+                  <FastForward size={18} />
+                </button>
+                <button className="icon-button" onClick={() => reset()} type="button" title={copy.meta.reset}>
+                  <RefreshCcw size={18} />
+                </button>
+              </div>
+            </header>
 
-        <div className="legend">
-          <span><i className="c red" />{copy.legend[0]}</span>
-          <span><i className="c pink" />{copy.legend[1]}</span>
-          <span><i className="c neutral" />{copy.legend[2]}</span>
-          <span><i className="c mint" />{copy.legend[3]}</span>
-          <span><i className="c green" />{copy.legend[4]}</span>
-          <span><i className="ring" />{copy.legend[5]}</span>
-        </div>
-      </section>
+            <div className="truth-strip">
+              <div>
+                <Target size={18} />
+                <span>{copy.strip.truth} {world.truth}</span>
+              </div>
+              <div>
+                <Activity size={18} />
+                <span>{copy.strip.tick} {world.tick}</span>
+              </div>
+              <div>
+                <Zap size={18} />
+                <span>{copy.strip.score} {score}</span>
+              </div>
+            </div>
 
-      <aside className="control-panel">
+            <div className="legend">
+              <span><i className="c red" />{copy.legend[0]}</span>
+              <span><i className="c pink" />{copy.legend[1]}</span>
+              <span><i className="c neutral" />{copy.legend[2]}</span>
+              <span><i className="c mint" />{copy.legend[3]}</span>
+              <span><i className="c green" />{copy.legend[4]}</span>
+              <span><i className="ring" />{copy.legend[5]}</span>
+            </div>
+          </section>
+
+          <aside className="control-panel">
         <section className="panel-block status">
           <div className="block-title">
             <Brain size={18} />
@@ -1203,7 +1217,9 @@ function App() {
           <label htmlFor="speed">{copy.sections.speed}</label>
           <input id="speed" type="range" min="60" max="520" step="20" value={580 - speed} onChange={(e) => setSpeed(580 - Number(e.target.value))} />
         </section>
-      </aside>
+          </aside>
+        </>
+      ) : null}
       {showTheory ? <TheoryModal copy={copy} onClose={() => setShowTheory(false)} /> : null}
     </main>
   );
