@@ -91,6 +91,7 @@ button:disabled {
 }
 
 .board-panel button,
+.board-panel a,
 .board-panel .text-button,
 .board-panel .icon-button,
 .board-panel .language-select,

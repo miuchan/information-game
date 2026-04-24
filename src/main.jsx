@@ -25,6 +25,7 @@ import {
   X,
   Zap,
 } from 'lucide-react';
+import { FaGithub } from 'react-icons/fa';
 import './styles.css';
 
 const CELL_SIZE = 18;
@@ -1039,6 +1040,9 @@ function App() {
               <BookOpen size={17} />
               <span>{copy.meta.theory}</span>
             </button>
+            <a className="icon-button" href="https://github.com/miuchan/information-game" target="_blank" rel="noreferrer" title="GitHub" aria-label="GitHub repository">
+              <FaGithub size={18} />
+            </a>
             <label className="language-select" title={copy.meta.language}>
               <Languages size={17} />
               <select value={locale} onChange={(event) => setLocale(event.target.value)} aria-label={copy.meta.language}>
