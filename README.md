@@ -1,60 +1,64 @@
-# 信息元胞
+# Info Cells
 
-一个“信息传播 + 信念演化 + 声誉竞争 + 网络变形”的社会元胞自动机游戏原型。
+[中文文档](./README.zh-CN.md)
 
-## 核心设定
+Info Cells is a social cellular automaton game prototype about information diffusion, belief evolution, reputation competition, and adaptive network structure.
 
-- 地图按当前视口自动生成离散格子，每个格子是一个信息主体。
-- 每局有隐藏真相 `theta in {0, 1}`。
-- 每个主体保留四层状态：真相线索、内部信念、外发消息、最终行动。
-- 主体只读取邻域消息，并同步更新，不存在中央控制。
+## Core Idea
 
-## 节点状态
+- The map is generated from the current viewport. Each cell is an information agent.
+- Each run has a hidden truth: `theta in {0, 1}`.
+- Every agent keeps four layers separate: private signals, internal belief, public message, and final action.
+- Agents read only local neighborhood messages and update synchronously. There is no central controller.
 
-每个节点包含：
+## Node State
 
-- `belief`: 信念，取值 `-2, -1, 0, 1, 2`
-- `message`: 当前消息，取值 `-1, 0, 1`
-- `action`: 行动，取值 `0, 1`
-- `reputation`: 声誉，取值 `0..9`
-- `type`: 类型，包括求真者、从众者、投机者、顽固者、核查者、机器人、煽动者
-- `filter`: 认知滤镜，影响它如何加权邻居消息
-- `energy`: 发言资源，强传播会消耗，获得注意力或说对话会恢复
+Each node contains:
 
-## 每回合流程
+- `belief`: discrete belief in `-2, -1, 0, 1, 2`
+- `message`: public broadcast in `-1, 0, 1`
+- `action`: final action in `0, 1`
+- `reputation`: reputation in `0..9`
+- `type`: truth-seeker, conformist, opportunist, stubborn, fact-checker, bot, or agitator
+- `filter`: cognitive filter that changes how neighbor messages are weighted
+- `energy`: speech resource; strong broadcasting consumes it, attention or verified accuracy can restore it
 
-1. 按类型和稀疏私有线索接收关于隐藏真相的信号。
-2. 节点根据自己的信念、类型、能量和邻域上轮消息生成新消息。
-3. 聚合邻居消息，声誉、热门、同社群偏好和匿名机制会影响权重。
-4. 根据信号推动、邻域压力和注意力推动更新信念。
-5. 根据信念选择行动，行动不必等同于消息。
-6. 每 5 回合揭示一次局部结果，调整声誉和能量。
+## Tick Loop
 
-## 玩家角色
+1. Agents receive sparse private signals about the hidden truth.
+2. Each node generates a message from belief, type, energy, and previous neighborhood messages.
+3. Neighbor messages are aggregated. Reputation, heat ranking, community bias, and anonymity affect weights.
+4. Belief updates from private signal pressure, social pressure, and attention pressure.
+5. Action is chosen from belief, but action does not have to equal public speech.
+6. Every 5 ticks, partial outcomes are revealed and reputation/energy are updated.
 
-玩家扮演平台和隐形操盘者的混合角色：
+## Player Role
 
-- 调整机制：显示声誉、热门优先、跨区传播、匿名发言、事实核查。
-- 投放干预：真相种子、核查节点、假高信誉节点、煽动者、桥接边。
-- 目标不是简单感染全图，而是在真相收敛、极化压力、讨论活跃之间取舍。
+The player acts as a hybrid platform designer and invisible operator:
 
-## 关卡
+- Tune mechanisms: reputation visibility, heat ranking, cross-community exposure, anonymous speech, and fact-checking.
+- Spend limited interventions: truth seeds, fact-checkers, fake high-reputation nodes, agitators, and bridge edges.
+- The goal is not simply to infect the whole map. The game is about trade-offs among truth alignment, polarization, and engagement.
 
-- 真相稀缺：真实信号少，噪声更容易占上风。
-- 两极社群：初始社区偏见强，目标是打穿回音室。
-- 匿名洪水：错误传播的信誉成本下降。
-- 爆款平台：热门推荐放大注意力瀑布。
-- 桥节点危机：跨区节点被污染后会触发大范围翻转。
-- 注意力市场：投机传播更强，求真者必须靠长期声誉生存。
+## Scenarios
 
-## 运行
+- Truth scarcity: truthful signals are rare and noise can dominate.
+- Polarized blocs: initial community bias is strong; the challenge is to break echo chambers.
+- Anonymous flood: false speech has lower reputation cost.
+- Viral platform: heat ranking amplifies information cascades.
+- Bridge crisis: contaminated bridge nodes can flip large regions.
+- Attention market: opportunistic speech is stronger; truth-seekers survive through long-run reputation.
+
+## Run Locally
 
 ```bash
 npm install
 npm run dev
 ```
 
-当前原型使用 Vite + React + Canvas。Canvas 会铺满整个视口，模拟网格随窗口大小重新生成。界面默认英文，右上角语言按钮可切换中文；“Theory”按钮会打开完整理论说明和参考文献模态框。生产构建：
+This prototype uses Vite, React, and Canvas. The Canvas fills the viewport, and the simulation grid regenerates from the window size. The UI defaults to English and includes a language selector with eight languages. The `Theory` button opens the theoretical foundation and references modal.
+
+Production build:
 
 ```bash
 npm run build
