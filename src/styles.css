@@ -650,6 +650,8 @@ input[type="range"] {
   }
 
   .app-shell {
+    display: flex;
+    flex-direction: column;
     height: auto;
     min-height: 100vh;
     overflow: visible;
@@ -673,6 +675,7 @@ input[type="range"] {
     right: auto;
     top: auto;
     width: 100%;
+    order: 1;
   }
 
   .board-panel::before {
@@ -690,6 +693,7 @@ input[type="range"] {
     right: auto;
     top: auto;
     width: 100%;
+    order: 3;
   }
 
   .left-hud-panel {
@@ -701,6 +705,7 @@ input[type="range"] {
     position: relative;
     top: auto;
     width: 100%;
+    order: 2;
   }
 
   .legend {
