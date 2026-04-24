@@ -1,275 +1,229 @@
 # Info Cells
 
-[中文文档](./README.zh-CN.md)
+[中文文档](./README.zh-CN.md) · [Live demo](https://ig.strangeattractor.life/)
 
-Live site: [https://ig.strangeattractor.life/](https://ig.strangeattractor.life/)
+Info Cells is an interactive social cellular automaton for studying how information, belief, reputation, and network structure co-evolve.
 
-Info Cells is a social cellular automaton game about:
+The project implements a deliberately small model: instead of simulating full Bayesian inference or a full economic game, it compresses those ideas into local, discrete, synchronous rules. The result is a playable system that can produce opinion clusters, echo chambers, misinformation cascades, reputation hubs, and polarization boundaries without scripting those patterns in advance.
 
-> information diffusion + belief evolution + reputation competition + adaptive network structure
+## Quick Start
 
-The core design choice is not to copy a full economic or Bayesian model directly. Instead, the model is compressed into local, discrete, synchronous update rules. That makes the system feel less like a paper and more like a social automaton that grows opinion clusters, polarization, cascades, rumors, and credibility centers by itself.
+```bash
+npm install
+npm run dev
+```
 
-## Cellular Automaton Interpretation
+Build:
 
-Classical cellular automata have three ingredients:
+```bash
+npm run build
+```
 
-- a discrete space
-- finite cell states
-- local transition rules
+The app is built with Vite, React, and Canvas. The Canvas fills the viewport; the simulation grid is regenerated from the current window size. The UI ships with eight languages and a `Theory` modal that summarizes the model and its references.
 
-Info Cells maps those ideas into a social information system:
+## What This Is
 
-- Cell: an information agent
-- Neighborhood: who the agent can observe
-- State: belief, message, action, reputation, type, and filter
-- Rule: update from private signals and neighbor messages
+Info Cells treats a society as a graph embedded in a grid.
 
-It is not a physical sandbox. It is a social propagation automaton that mixes local update rules from cellular automata, diffusion dynamics from epidemic models, belief shifts from opinion dynamics, and incentive tension from economic games.
+| Concept | In the game |
+| --- | --- |
+| Cell | Information agent |
+| Neighborhood | Agents whose messages are visible |
+| State | Belief, message, action, reputation, type, filter, energy |
+| Transition rule | Local update from private signals and neighbor messages |
+| Global environment | A hidden binary truth `theta` |
 
-## Formal State Model
+The model is closest to a hybrid of:
 
-Each cell `i` stores a compact state vector:
+- cellular automata: local, discrete, synchronous updates
+- social learning: agents update from neighbors
+- information design: platform rules change what is observed or amplified
+- misinformation models: forceful or strategic agents can distort aggregation
+- agent-based modeling: macro patterns emerge from local rules
+
+## Model State
+
+Each agent `i` stores:
 
 ```text
 X_i = (b_i, m_i, a_i, r_i, t_i, f_i, e_i)
 ```
 
-where:
+| Symbol | Meaning | Domain |
+| --- | --- | --- |
+| `b_i` | belief | `{-2, -1, 0, 1, 2}` |
+| `m_i` | public message | `{-1, 0, 1}` |
+| `a_i` | action | `{0, 1}` |
+| `r_i` | reputation | `{0, ..., 9}` |
+| `t_i` | agent type | truth-seeker, conformist, opportunist, stubborn, fact-checker, bot, agitator |
+| `f_i` | cognitive filter | discrete weighting rule |
+| `e_i` | speech energy | bounded integer resource |
 
-- `b_i in {-2, -1, 0, 1, 2}` is belief.
-- `m_i in {-1, 0, 1}` is the public message.
-- `a_i in {0, 1}` is the final action.
-- `r_i in {0, ..., 9}` is reputation.
-- `t_i` is the agent type.
-- `f_i` is the cognitive filter or bias.
-- `e_i` is speech energy.
-
-### Belief
-
-```text
-b_i = -2  certain that the state is 0
-b_i = -1  leans toward 0
-b_i =  0  uncertain
-b_i =  1  leans toward 1
-b_i =  2  certain that the state is 1
-```
-
-Discrete belief makes the simulation readable and game-like while still preserving meaningful uncertainty.
-
-### Message
+Belief is discrete:
 
 ```text
-m_i = -1  broadcasts a negative / anti-1 message
-m_i =  0  stays silent
-m_i =  1  broadcasts a positive / pro-1 message
+-2  certain state is 0
+-1  leans toward 0
+ 0  uncertain
+ 1  leans toward 1
+ 2  certain state is 1
 ```
 
-Message is intentionally separated from belief. Agents may believe one thing, say another, or remain silent.
+Message and action are intentionally separated. An agent can believe one thing, say another, or stay silent. This keeps the model from collapsing into ordinary color infection.
 
-### Action
+## Hidden Truth and Signals
 
-```text
-a_i in {0, 1}
-```
-
-Action represents what the agent finally does: vote, join, buy, sell, support, reject, forward, or ignore. Action is the layer used by the truth-alignment score.
-
-### Reputation
-
-```text
-r_i in {0, ..., 9}
-```
-
-High-reputation agents have more influence over neighbors. Reputation changes over time when partial outcomes are revealed.
-
-### Type
-
-Agent heterogeneity is essential. Current types include:
-
-- Truth-seeker: speaks only when confident.
-- Conformist: follows local majority pressure.
-- Opportunist: chases attention and influence.
-- Stubborn: resists belief changes.
-- Fact-checker: receives stronger truth signals.
-- Bot: pushes a fixed strategic message.
-- Agitator: prefers strong or extreme messaging.
-
-Without heterogeneous types, the system collapses into a simple color-spreading model.
-
-### Filter
-
-The filter `f_i` is a discrete cognitive bias:
-
-- trust high-reputation speakers
-- overweight same-community messages
-- follow strong or frequent messages
-- discount cross-community messages
-
-This is a game-friendly compression of Bayesian updating into a local heuristic.
-
-## Hidden Truth and Private Signals
-
-Each run has a hidden global state:
+Each run has a hidden state:
 
 ```text
 theta in {0, 1}
 ```
 
-The hidden truth gives the simulation informational content. Without it, the model would be pure factional politics.
-
-Agents sometimes receive private signals:
+Agents may receive noisy private signals:
 
 ```text
 s_i in {0, 1}
 ```
 
-The signal is noisy. Different scenarios and special nodes change the signal rate and accuracy. A supporting signal moves belief by one step:
+A signal moves belief by one discrete step:
 
 ```text
 if s_i = 1: b_i += 1
 if s_i = 0: b_i -= 1
-b_i is clipped to [-2, 2]
+b_i = clip(b_i, -2, 2)
 ```
 
-## Neighborhood and Network Structure
+The hidden truth gives the simulation an informational backbone. Without it, the system would only simulate factional alignment.
 
-The visible map is a grid, but the graph is not only a grid.
+## Network Structure
 
-Each cell has:
+The graph combines three layers:
 
-- local Moore-neighborhood connections around it
-- community membership based on map region
-- a small number of cross-community bridge edges
+1. **Grid locality**: agents observe nearby cells using a Moore-style neighborhood.
+2. **Communities**: the map is partitioned into regions; filters can overweight same-community messages.
+3. **Bridge edges**: sparse long-range links create small-world shortcuts.
 
-This combines:
+This follows the intuition of Watts and Strogatz: mostly local networks with a few long-range links can preserve clustering while allowing fast propagation. In this game, those shortcuts can either correct local errors or carry rumors across communities.
 
-- grid locality, which keeps the cellular automaton readable
-- small-world shortcuts, which allow long-distance cascades
-- community partitions, which create echo chambers and polarization
+## Tick Update
 
-## Synchronous Tick Rule
-
-Every tick updates all cells synchronously in six stages.
+All agents update synchronously.
 
 ### 1. Private Signal
 
-Each agent receives a noisy private signal with scenario-dependent probability and accuracy.
+Each agent receives a private signal with scenario-dependent probability and accuracy. Fact-checkers receive stronger truth signals.
 
 ### 2. Message Generation
 
-Agents encode belief into public speech strategically:
+The baseline rule is:
 
 ```text
-if b_i >= 1: tends to m_i = 1
-if b_i <= -1: tends to m_i = -1
-if b_i = 0: usually m_i = 0
+if b_i >= 1: m_i tends to 1
+if b_i <= -1: m_i tends to -1
+if b_i = 0:  m_i tends to 0
 ```
 
-Types modify this base rule:
+Agent type modifies this rule:
 
-- Truth-seeker speaks only when `|b_i| >= 2`.
-- Conformist leans toward the previous local majority.
-- Opportunist amplifies attention-rich messages.
-- Agitator speaks strongly even with weak evidence.
+| Type | Behavior |
+| --- | --- |
+| Truth-seeker | speaks only when confidence is high |
+| Conformist | follows local majority pressure |
+| Opportunist | reacts to attention and heat ranking |
+| Stubborn | resists opposing pressure |
+| Fact-checker | receives stronger truth signals |
+| Bot | pushes a fixed strategic message |
+| Agitator | favors strong messages |
 
 ### 3. Neighborhood Aggregation
 
-Each node aggregates neighbor messages into a local pressure field:
+Each node aggregates visible neighbor messages:
 
 ```text
 I_i = sum_{j in N(i)} w_ij * m_j
 ```
 
-The weight can depend on reputation, community, attention, and platform rules:
+A minimal reputation-weighted influence rule is:
 
 ```text
 w_ij = 1 + alpha * r_j
 ```
 
-Additional modifiers come from cognitive filters and active mechanisms such as reputation visibility, heat ranking, anonymity, or cross-community exposure.
+The implementation also modifies `w_ij` using cognitive filters, same-community bias, heat ranking, anonymity, and reputation visibility.
 
 ### 4. Belief Update
 
-Belief changes from three forces:
+Belief changes through three pressures:
 
 ```text
-b_i_new = clip(b_i + P_i + C_i + A_i, -2, 2)
+b_i' = clip(b_i + P_i + C_i + A_i, -2, 2)
 ```
 
-where:
+| Term | Meaning |
+| --- | --- |
+| `P_i` | private signal pressure |
+| `C_i` | local consensus pressure |
+| `A_i` | attention or extremity pressure |
 
-- `P_i` is private-signal pressure.
-- `C_i` is neighborhood consensus pressure.
-- `A_i` is attention or extremity pressure.
-
-Different types use different thresholds. Truth-seekers need stronger evidence; conformists move more easily; stubborn agents resist opposing pressure; opportunists react to attention.
+Different agent types use different thresholds before accepting pressure.
 
 ### 5. Action Choice
 
-Action is not identical to speech:
+Action is derived from belief but is not the same as message:
 
 ```text
 if b_i >= 1: a_i = 1
 if b_i <= -1: a_i = 0
-if b_i = 0: keep previous action
+if b_i = 0:  keep previous action
 ```
 
-This preserves the four-layer distinction:
+The four-layer separation is central:
 
 ```text
 truth -> belief -> message -> action
 ```
 
-If these layers collapse into one color, the game becomes ordinary infection diffusion.
+### 6. Reputation and Energy
 
-### 6. Reputation and Energy Update
+Every few ticks, partial outcomes are revealed.
 
-Every few ticks, partial outcomes are revealed:
-
-- true and later-verified speech increases reputation
+- verified true speech increases reputation
 - false high-impact speech decreases reputation
-- sudden reversals can reduce credibility
-- attention can restore speech energy
-- strong speech consumes more energy
+- sharp reversals reduce credibility
+- strong speech spends energy
+- attention and accuracy can restore energy
 
-This creates a long-run trade-off: attention-seeking can dominate in the short run, while accuracy can become powerful over repeated verification.
+This creates a tension between short-term attention and long-run credibility.
 
-## Player Role
+## Player Controls
 
-The player should not directly control every cell. The game is strongest when the player controls mechanisms or rare local interventions.
+The player does not directly command every cell. The player changes mechanisms and spends scarce interventions.
 
-### Platform Designer
+### Platform Rules
 
-The player can tune:
+| Rule | Effect |
+| --- | --- |
+| Show reputation | lets reputation become visible influence |
+| Rank by heat | amplifies high-attention messages |
+| Cross-community | allows bridge exposure across regions |
+| Anonymous speech | weakens reputation penalties |
+| Fact-checking | introduces high-accuracy corrective nodes |
 
-- show or hide reputation
-- rank by heat or not
-- allow or restrict cross-community exposure
-- allow or restrict anonymous speech
-- enable fact-checking
+### Local Interventions
 
-This mode is closest to information design and mechanism design.
+| Intervention | Effect |
+| --- | --- |
+| Truth seed | injects a high-confidence truthful signal |
+| Fact-checker | creates a high-accuracy corrective node |
+| Fake high-reputation node | creates a strategic misinformation source |
+| Agitator | creates a strong-message source |
+| Bridge edges | adds cross-community links |
 
-### Invisible Operator
+## Metrics
 
-The player has limited interventions:
+The game avoids a single “infect the map” objective. It reports three axes.
 
-- truth seed
-- fact-checker
-- fake high-reputation node
-- agitator
-- bridge edge
-
-The pleasure comes from changing a few local conditions and watching the whole network follow a different history.
-
-## Scoring
-
-The game avoids a single infection-style win condition. It uses three axes.
-
-### Truth
-
-Truth alignment measures how many actions match the hidden truth:
+### Truth Alignment
 
 ```text
 T = (1 / n) * sum_i 1[a_i = theta]
@@ -277,64 +231,54 @@ T = (1 / n) * sum_i 1[a_i = theta]
 
 ### Polarization
 
-Polarization measures between-community belief difference:
-
 ```text
 P = Var_community(mean_b_c)
 ```
 
-High values mean community-level beliefs are far apart.
-
 ### Engagement
-
-Engagement measures message activity:
 
 ```text
 E = (1 / n) * sum_i 1[m_i != 0]
 ```
 
-These metrics create real tension:
-
-- truth can rise while engagement falls
-- engagement can rise with polarization
-- reducing polarization can suppress speech
-
-## Platform Mechanisms
-
-The prototype exposes several mechanism buttons:
-
-- Show reputation: high-reputation nodes become visible centers.
-- Rank by heat: accelerates cascades and can increase polarization.
-- Cross-community: enables correction and also long-distance rumor spread.
-- Anonymous speech: lowers reputation costs and increases noise.
-- Fact-checking: introduces high-accuracy, lower-spread corrective nodes.
+These objectives are intentionally not identical. More engagement can increase polarization; suppressing polarization can reduce speech; truth can improve slowly through reputation rather than immediately through popularity.
 
 ## Scenarios
 
-- Truth scarcity: truthful signals are rare, so rumor wins easily.
-- Polarized blocs: cross-community exposure is limited by initial bias.
-- Anonymous flood: reputation penalties are weaker.
-- Viral platform: heat ranking makes cascades easier.
-- Bridge crisis: contaminated bridge nodes can flip large regions.
-- Attention market: opportunistic agents thrive unless accuracy compounds over time.
+| Scenario | Focus |
+| --- | --- |
+| Truth scarcity | sparse reliable signals |
+| Polarized blocs | initial community bias and echo chambers |
+| Anonymous flood | weak accountability |
+| Viral platform | heat ranking and cascades |
+| Bridge crisis | contaminated cross-community connectors |
+| Attention market | competition between accuracy and visibility |
+
+## Theoretical Background
+
+The implementation is not a literal reproduction of any one paper. It is a game model that borrows specific mechanisms from several literatures:
+
+- **Bayesian persuasion and information design**: platform interventions change signal structures rather than directly changing truth or utility.
+- **Bayes correlated equilibrium**: rules determine what information agents can condition on before choosing messages and actions.
+- **Non-Bayesian social learning**: repeated neighbor-based averaging motivates local belief pressure.
+- **Misinformation in networks**: forceful or stubborn agents can distort information aggregation.
+- **Small-world networks**: sparse long-range links can accelerate diffusion while preserving local clustering.
+- **Agent-based polarization**: local convergence rules can still create global fragmentation.
+- **Empirical misinformation diffusion**: false or novel information can spread differently from true information, especially under attention-based incentives.
+
+## References
+
+- Kamenica, E., & Gentzkow, M. (2011). [Bayesian Persuasion](https://www.aeaweb.org/articles?id=10.1257%2Faer.101.6.2590). *American Economic Review*.
+- Bergemann, D., & Morris, S. (2016). [Bayes Correlated Equilibrium and the Comparison of Information Structures in Games](https://elischolar.library.yale.edu/cowles-discussion-paper-series/2174/). *Theoretical Economics*.
+- DeGroot, M. H. (1974). [Reaching a Consensus](https://www.tandfonline.com/doi/abs/10.1080/01621459.1974.10480137). *Journal of the American Statistical Association*.
+- Golub, B., & Jackson, M. O. (2010). [Naive Learning in Social Networks and the Wisdom of Crowds](https://web.stanford.edu/~jacksonm/naivelearning.pdf). *American Economic Journal: Microeconomics*.
+- Acemoglu, D., Ozdaglar, A., & ParandehGheibi, A. (2010). [Spread of (Mis)information in Social Networks](https://www.sciencedirect.com/science/article/abs/pii/S0899825610000217). *Games and Economic Behavior*.
+- Watts, D. J., & Strogatz, S. H. (1998). [Collective dynamics of small-world networks](https://www.nature.com/articles/30918). *Nature*.
+- Axelrod, R. (1997). [The Dissemination of Culture: A Model with Local Convergence and Global Polarization](https://journals.sagepub.com/doi/10.1177/0022002797041002001). *Journal of Conflict Resolution*.
+- Allcott, H., & Gentzkow, M. (2017). [Social Media and Fake News in the 2016 Election](https://www.aeaweb.org/articles?id=10.1257%2Fjep.31.2.211). *Journal of Economic Perspectives*.
+- Vosoughi, S., Roy, D., & Aral, S. (2018). [The Spread of True and False News Online](https://www.science.org/doi/10.1126/science.aap9559). *Science*.
+- Papanastasiou, Y. (2020). [Fake News Propagation and Detection: A Sequential Model](https://pubsonline.informs.org/doi/10.1287/mnsc.2019.3295). *Management Science*.
 
 ## Design Principle
 
-The guiding principle is:
-
-> Use discrete local rules to simulate continuous strategic interaction; use visual patterns to reveal abstract information structure; use small player interventions to move large-scale social emergence.
-
-## Run Locally
-
-```bash
-npm install
-npm run dev
-```
-
-This prototype uses Vite, React, and Canvas. The Canvas fills the viewport, and the simulation grid regenerates from the window size. The UI defaults to English and includes a language selector with eight languages. The `Theory` button opens the theoretical foundation and references modal.
-
-Production build:
-
-```bash
-npm run build
-```
+Use discrete local rules to approximate continuous strategic interaction; use visual patterns to expose abstract information structure; use small interventions to explore large-scale social emergence.
