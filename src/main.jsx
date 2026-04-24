@@ -1035,6 +1035,16 @@ function App() {
       {!hideControls ? (
         <>
           <aside className="left-hud-panel">
+            <section className="panel-block guide-card">
+              <div className="block-title">
+                <Globe2 size={18} />
+                <h2>{copy.guide.title}</h2>
+              </div>
+              <ul>
+                {copy.guide.points.map((point) => <li key={point}>{point}</li>)}
+              </ul>
+            </section>
+
             <section className="panel-block compact">
               <label htmlFor="speed">{copy.sections.speed}</label>
               <input id="speed" type="range" min="60" max="520" step="20" value={580 - speed} onChange={(e) => setSpeed(580 - Number(e.target.value))} />
@@ -1136,16 +1146,6 @@ function App() {
             <span>{copy.status.support1}: {Math.round(metrics.positive * 100)}%</span>
           </div>
           <p className="event-line">{eventText}</p>
-        </section>
-
-        <section className="panel-block guide-card">
-          <div className="block-title">
-            <Globe2 size={18} />
-            <h2>{copy.guide.title}</h2>
-          </div>
-          <ul>
-            {copy.guide.points.map((point) => <li key={point}>{point}</li>)}
-          </ul>
         </section>
 
         <section className="panel-block">
