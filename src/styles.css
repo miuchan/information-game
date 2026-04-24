@@ -72,7 +72,8 @@ button:disabled {
 }
 
 .board-panel,
-.control-panel {
+.control-panel,
+.left-hud-panel {
   position: relative;
   z-index: 2;
 }
@@ -123,7 +124,25 @@ button:disabled {
   width: 390px;
 }
 
+.left-hud-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  left: 18px;
+  max-height: calc(100vh - 190px);
+  overflow: auto;
+  position: fixed;
+  scrollbar-width: none;
+  scrollbar-color: rgba(236,241,237,.22) transparent;
+  top: 172px;
+  width: 320px;
+}
+
 .control-panel::-webkit-scrollbar {
+  display: none;
+}
+
+.left-hud-panel::-webkit-scrollbar {
   display: none;
 }
 
@@ -669,6 +688,17 @@ input[type="range"] {
     overflow: visible;
     position: relative;
     right: auto;
+    top: auto;
+    width: 100%;
+  }
+
+  .left-hud-panel {
+    left: auto;
+    margin: 0 auto 10px;
+    max-height: none;
+    max-width: 760px;
+    overflow: visible;
+    position: relative;
     top: auto;
     width: 100%;
   }
