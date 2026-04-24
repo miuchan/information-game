@@ -1034,6 +1034,33 @@ function App() {
 
       {!hideControls ? (
         <>
+          <aside className="left-hud-panel">
+            <section className="panel-block compact">
+              <label htmlFor="speed">{copy.sections.speed}</label>
+              <input id="speed" type="range" min="60" max="520" step="20" value={580 - speed} onChange={(e) => setSpeed(580 - Number(e.target.value))} />
+            </section>
+
+            <section className="panel-block node-card">
+              <div className="block-title">
+                <Radio size={18} />
+                <h2>{copy.sections.node}</h2>
+              </div>
+              {selectedNode ? (
+                <div className="node-grid">
+                  <span>{copy.node.coord}</span><strong>{selectedNode.x + 1}, {selectedNode.y + 1}</strong>
+                  <span>{copy.node.type}</span><strong>{copy.types[selectedNode.type]}</strong>
+                  <span>{copy.node.belief}</span><strong>{selectedNode.belief}</strong>
+                  <span>{copy.node.message}</span><strong>{selectedNode.message}</strong>
+                  <span>{copy.node.action}</span><strong>{selectedNode.action}</strong>
+                  <span>{copy.node.reputation}</span><strong>{selectedNode.reputation}</strong>
+                  <span>{copy.node.energy}</span><strong>{selectedNode.energy}</strong>
+                </div>
+              ) : (
+                <p className="hint">{copy.node.hint}</p>
+              )}
+            </section>
+          </aside>
+
           <section className="board-panel">
             <header className="topbar">
               <div>
@@ -1184,30 +1211,6 @@ function App() {
           </div>
         </section>
 
-        <section className="panel-block node-card">
-          <div className="block-title">
-            <Radio size={18} />
-            <h2>{copy.sections.node}</h2>
-          </div>
-          {selectedNode ? (
-            <div className="node-grid">
-              <span>{copy.node.coord}</span><strong>{selectedNode.x + 1}, {selectedNode.y + 1}</strong>
-              <span>{copy.node.type}</span><strong>{copy.types[selectedNode.type]}</strong>
-              <span>{copy.node.belief}</span><strong>{selectedNode.belief}</strong>
-              <span>{copy.node.message}</span><strong>{selectedNode.message}</strong>
-              <span>{copy.node.action}</span><strong>{selectedNode.action}</strong>
-              <span>{copy.node.reputation}</span><strong>{selectedNode.reputation}</strong>
-              <span>{copy.node.energy}</span><strong>{selectedNode.energy}</strong>
-            </div>
-          ) : (
-            <p className="hint">{copy.node.hint}</p>
-          )}
-        </section>
-
-        <section className="panel-block compact">
-          <label htmlFor="speed">{copy.sections.speed}</label>
-          <input id="speed" type="range" min="60" max="520" step="20" value={580 - speed} onChange={(e) => setSpeed(580 - Number(e.target.value))} />
-        </section>
           </aside>
         </>
       ) : null}
