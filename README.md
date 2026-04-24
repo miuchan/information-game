@@ -2,6 +2,8 @@
 
 [中文文档](./README.zh-CN.md)
 
+Live site: [https://ig.strangeattractor.life/](https://ig.strangeattractor.life/)
+
 Info Cells is a social cellular automaton game prototype about information diffusion, belief evolution, reputation competition, and adaptive network structure.
 
 ## Core Idea

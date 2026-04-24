@@ -2,6 +2,8 @@
 
 [English README](./README.md)
 
+在线体验：[https://ig.strangeattractor.life/](https://ig.strangeattractor.life/)
+
 一个“信息传播 + 信念演化 + 声誉竞争 + 网络变形”的社会元胞自动机游戏原型。
 
 ## 核心设定
