@@ -438,6 +438,7 @@ function makeRng(seed) {
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const sign = (value) => (value > 0 ? 1 : value < 0 ? -1 : 0);
+const actionFromBelief = (belief) => (belief >= 1 ? 1 : belief <= -1 ? 0 : null);
 const idx = (x, y, width) => y * width + x;
 const coord = (i, width) => [i % width, Math.floor(i / width)];
 
@@ -492,6 +493,7 @@ function buildNeighbors(rng, width, height, crossCommunity = true) {
 function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = viewportGrid()) {
   const rng = makeRng(seed);
   const truth = rng() > 0.5 ? 1 : 0;
+  const settings = scenarioSettings(scenarioId);
   const nodes = [];
   const { width, height, cellSize } = dimensions;
   const scenarioBias = {
@@ -511,7 +513,9 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
         : scenarioBias;
       const roll = rng();
       const type = roll < 0.22 ? 'truth' : roll < 0.58 ? 'social' : roll < 0.82 ? 'attention' : 'stubborn';
-      const privateSignal = rng() < 0.42 ? (rng() < 0.62 ? truth : 1 - truth) : null;
+      const privateSignal = rng() < settings.initialSignalRate
+        ? (rng() < settings.initialSignalAccuracy ? truth : 1 - truth)
+        : null;
       const signalPush = privateSignal === null ? 0 : privateSignal === 1 ? 1 : -1;
       const belief = clamp(localBias + signalPush + (rng() < 0.12 ? (rng() > 0.5 ? 1 : -1) : 0), -2, 2);
       nodes.push({
@@ -522,7 +526,7 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
         belief,
         prevBelief: belief,
         message: belief > 0 ? 1 : belief < 0 ? -1 : 0,
-        action: belief >= 0 ? 1 : 0,
+        action: actionFromBelief(belief),
         reputation: Math.floor(1 + rng() * 4),
         type,
         filter: Math.floor(rng() * 4),
@@ -531,6 +535,7 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
         attention: 0,
         checked: false,
         evidenceMemory: 0,
+        accuracyStreak: 0,
       });
     }
   }
@@ -545,6 +550,7 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
         const node = nodes[idx(x, y, width)];
         node.belief = truth === 1 ? -2 : 2;
         node.message = truth === 1 ? -1 : 1;
+        node.action = actionFromBelief(node.belief);
         node.type = 'attention';
         node.reputation = 5;
       });
@@ -567,12 +573,12 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
 
 function scenarioSettings(id) {
   return {
-    scarce: { signalRate: 0.05, signalAccuracy: 0.76, attentionBoost: 1 },
-    polarized: { signalRate: 0.046, signalAccuracy: 0.74, attentionBoost: 1 },
-    anonymous: { signalRate: 0.044, signalAccuracy: 0.73, attentionBoost: 1.15 },
-    viral: { signalRate: 0.04, signalAccuracy: 0.72, attentionBoost: 1.7 },
-    bridge: { signalRate: 0.045, signalAccuracy: 0.74, attentionBoost: 1.25 },
-    market: { signalRate: 0.041, signalAccuracy: 0.72, attentionBoost: 1.45 },
+    scarce: { initialSignalRate: 0.1, initialSignalAccuracy: 0.62, signalRate: 0.05, signalAccuracy: 0.76, attentionBoost: 1, publicEvidenceRate: 0.2 },
+    polarized: { initialSignalRate: 0.36, initialSignalAccuracy: 0.6, signalRate: 0.046, signalAccuracy: 0.74, attentionBoost: 1, publicEvidenceRate: 0.18 },
+    anonymous: { initialSignalRate: 0.34, initialSignalAccuracy: 0.59, signalRate: 0.044, signalAccuracy: 0.73, attentionBoost: 1.15, publicEvidenceRate: 0.14 },
+    viral: { initialSignalRate: 0.33, initialSignalAccuracy: 0.58, signalRate: 0.04, signalAccuracy: 0.72, attentionBoost: 1.7, publicEvidenceRate: 0.14 },
+    bridge: { initialSignalRate: 0.34, initialSignalAccuracy: 0.6, signalRate: 0.045, signalAccuracy: 0.74, attentionBoost: 1.25, publicEvidenceRate: 0.18 },
+    market: { initialSignalRate: 0.32, initialSignalAccuracy: 0.58, signalRate: 0.041, signalAccuracy: 0.72, attentionBoost: 1.45, publicEvidenceRate: 0.16 },
   }[id];
 }
 
@@ -610,10 +616,12 @@ function pressureFor(node, oldNodes, neighbors, options) {
     if (node.filter === 2 && Math.abs(other.message) > 0) weight += 0.25;
     if (node.filter === 3 && other.community !== node.community) weight *= 0.72;
     if (options.anonymous) weight = 1 + (options.hotRanking ? Math.min(1.4, other.attention * 0.15) : 0);
+    const evidenceBacked = Math.abs(other.evidenceMemory || 0) >= 3 && sign(other.evidenceMemory || 0) === other.message;
+    if (evidenceBacked) weight += 0.9;
     pressure += weight * other.message;
     heard += Math.abs(weight);
   });
-  return heard === 0 ? 0 : pressure / Math.max(1, Math.sqrt(heard));
+  return heard === 0 ? 0 : pressure / Math.max(1, Math.pow(heard, 0.75));
 }
 
 function stepWorld(world, options, scenarioId) {
@@ -670,7 +678,12 @@ function stepWorld(world, options, scenarioId) {
     let nextBelief = clamp(node.belief + privatePush + socialPush + attentionPush, -2, 2);
     if (Math.abs(nextBelief) === 2 && rng() < 0.005) nextBelief -= sign(nextBelief);
 
-    const nextAction = nextBelief >= 1 ? 1 : nextBelief <= -1 ? 0 : node.action;
+    if (revealTick && rng() < settings.publicEvidenceRate) {
+      evidenceMemory = clamp(evidenceMemory + truthPush, -5, 5);
+      if (node.type === 'truth' || node.type === 'checker') nextBelief = clamp(nextBelief + truthPush, -2, 2);
+    }
+
+    const nextAction = actionFromBelief(nextBelief);
     const spent = node.message === 0 ? 0 : node.type === 'attention' || node.type === 'agitator' ? 2 : 1;
     const attention = Math.max(0, Math.round(Math.abs(pressure) + (node.message !== 0 ? 1 : 0)));
     return {
@@ -693,11 +706,18 @@ function stepWorld(world, options, scenarioId) {
       if (saidTruth) {
         node.reputation = clamp(node.reputation + 1, 0, 9);
         node.energy = clamp(node.energy + 1, 0, 9);
+        node.accuracyStreak = (node.accuracyStreak || 0) + 1;
         rewarded += 1;
       }
       if (saidFalse && (!options.anonymous || options.factCheck)) {
         node.reputation = clamp(node.reputation - (node.attention >= 3 ? 2 : 1), 0, 9);
+        node.accuracyStreak = 0;
         punished += 1;
+      }
+      if (!saidTruth && !saidFalse && node.message === 0) node.accuracyStreak = 0;
+      if ((node.accuracyStreak || 0) >= 3 && node.type !== 'bot') {
+        if (node.type === 'attention') node.type = 'truth';
+        node.checked = true;
       }
       if (node.belief !== node.prevBelief && Math.abs(node.belief - node.prevBelief) >= 2) {
         node.reputation = clamp(node.reputation - 1, 0, 9);
@@ -716,7 +736,8 @@ function stepWorld(world, options, scenarioId) {
 
 function getMetrics(world) {
   const total = world.nodes.length || 1;
-  const truthAligned = world.nodes.filter((n) => n.action === world.truth).length / total;
+  const acted = world.nodes.filter((n) => n.action !== null);
+  const truthAligned = acted.length ? acted.filter((n) => n.action === world.truth).length / acted.length : 0;
   const active = world.nodes.filter((n) => n.message !== 0).length / total;
   const avgRep = world.nodes.reduce((sum, n) => sum + n.reputation, 0) / total;
   const communityMeans = [0, 1, 2, 3].map((c) => {
@@ -727,7 +748,8 @@ function getMetrics(world) {
   const polarization = communityMeans.reduce((sum, v) => sum + (v - globalMean) ** 2, 0) / 4 / 4;
   const positive = world.nodes.filter((n) => n.belief > 0).length / total;
   const negative = world.nodes.filter((n) => n.belief < 0).length / total;
-  return { truthAligned, active, avgRep, polarization, positive, negative };
+  const undecided = world.nodes.filter((n) => n.action === null).length / total;
+  return { truthAligned, active, avgRep, polarization, positive, negative, undecided };
 }
 
 function applyIntervention(world, kind, targetId) {
@@ -737,6 +759,7 @@ function applyIntervention(world, kind, targetId) {
   if (kind === 'seedTrue') {
     node.belief = world.truth === 1 ? 2 : -2;
     node.message = world.truth === 1 ? 1 : -1;
+    node.action = actionFromBelief(node.belief);
     node.energy = 9;
     node.reputation = clamp(node.reputation + 1, 0, 9);
   }
@@ -746,6 +769,7 @@ function applyIntervention(world, kind, targetId) {
     node.reputation = 7;
     node.belief = world.truth === 1 ? 2 : -2;
     node.message = world.truth === 1 ? 1 : -1;
+    node.action = actionFromBelief(node.belief);
   }
   if (kind === 'bot') {
     node.type = 'bot';
@@ -753,6 +777,7 @@ function applyIntervention(world, kind, targetId) {
     node.energy = 9;
     node.belief = world.truth === 1 ? -2 : 2;
     node.message = world.truth === 1 ? -1 : 1;
+    node.action = actionFromBelief(node.belief);
   }
   if (kind === 'agitator') {
     node.type = 'agitator';
@@ -1076,7 +1101,7 @@ function App() {
                   <span>{copy.node.type}</span><strong>{copy.types[selectedNode.type]}</strong>
                   <span>{copy.node.belief}</span><strong>{selectedNode.belief}</strong>
                   <span>{copy.node.message}</span><strong>{selectedNode.message}</strong>
-                  <span>{copy.node.action}</span><strong>{selectedNode.action}</strong>
+                  <span>{copy.node.action}</span><strong>{selectedNode.action ?? 'undecided'}</strong>
                   <span>{copy.node.reputation}</span><strong>{selectedNode.reputation}</strong>
                   <span>{copy.node.energy}</span><strong>{selectedNode.energy}</strong>
                 </div>
@@ -1159,6 +1184,7 @@ function App() {
           <div className="split-stat">
             <span>{copy.status.support0}: {Math.round(metrics.negative * 100)}%</span>
             <span>{copy.status.support1}: {Math.round(metrics.positive * 100)}%</span>
+            <span>Undecided: {Math.round(metrics.undecided * 100)}%</span>
           </div>
           <p className="event-line">{eventText}</p>
         </section>
