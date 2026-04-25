@@ -329,10 +329,10 @@ h3 {
 
 .red { background: #b93848; }
 .pink { background: #df8376; }
-.neutral { background: #7a7f89; }
-.mint { background: #3a7ed8; }
-.purple { background: #8756d8; }
-.gold { background: #d8a044; }
+.neutral { background: #000000; border: 1px solid rgba(255,255,255,.25); }
+.mint { background: linear-gradient(90deg, #001122, #22ccaa); }
+.purple { background: linear-gradient(90deg, #3344ff, #ff33aa); }
+.gold { background: #ffffff; border: 1px solid rgba(0,0,0,.35); }
 .green { background: #178f78; }
 .ring {
   border: 2px solid #f1c84c;

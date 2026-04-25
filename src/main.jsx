@@ -452,12 +452,20 @@ const EVOLUTION_PACE = {
   weakPushAdoption: 0.6,
 };
 
-const THEORIES = [
-  { id: 'folk', level: 0, color: '#7a7f89', complexity: 0.4, scope: 0.35 },
-  { id: 'classical', level: 1, color: '#3a7ed8', complexity: 1, scope: 0.6 },
-  { id: 'relativity', level: 2, color: '#8756d8', complexity: 1.9, scope: 0.84 },
-  { id: 'frontier', level: 3, color: '#d8a044', complexity: 2.8, scope: 1 },
-];
+const MAX_THEORY_INDEX = 0xFFFFFF;
+const COLOR_STEP = 1;
+
+function normalizeIndex(value) {
+  return clamp(Math.round(value), 0, MAX_THEORY_INDEX);
+}
+
+function indexToColor(value) {
+  return `#${normalizeIndex(value).toString(16).padStart(6, '0')}`;
+}
+
+function indexDepth(value) {
+  return normalizeIndex(value) / MAX_THEORY_INDEX;
+}
 
 function stressAt(x, y, world) {
   const cx = (world.width - 1) / 2;
@@ -469,11 +477,14 @@ function stressAt(x, y, world) {
   return clamp(radial * 0.75 + wave * world.frontierPressure * 0.45 + world.domainRadius * 0.3, 0, 1);
 }
 
-function theoryError(level, contextStress, precision, hiddenLevel) {
-  const mismatch = Math.max(0, hiddenLevel - level);
-  const frontierPenalty = Math.max(0, contextStress - THEORIES[level].scope);
-  const precisionPenalty = precision * mismatch * 0.55;
-  const underfit = mismatch * 0.42 + frontierPenalty * (1.2 + mismatch * 0.25);
+function theoryError(theoryIndex, contextStress, precision, hiddenIndex) {
+  const depth = indexDepth(theoryIndex);
+  const hiddenDepth = indexDepth(hiddenIndex);
+  const mismatch = Math.max(0, hiddenDepth - depth);
+  const scope = 0.22 + 0.78 * Math.pow(depth, 0.8);
+  const frontierPenalty = Math.max(0, contextStress - scope);
+  const precisionPenalty = precision * mismatch * 0.7;
+  const underfit = mismatch * 1.12 + frontierPenalty * (1.05 + mismatch * 0.35);
   return underfit + precisionPenalty;
 }
 
@@ -545,17 +556,15 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
     bridge: -1,
     market: 0,
   }[scenarioId];
-  const hiddenLevel = clamp(
+  const hiddenIndex = normalizeIndex(
     {
-      scarce: 1,
-      polarized: 1,
-      anonymous: 1,
-      viral: 1,
-      bridge: 2,
-      market: 2,
-    }[scenarioId] + (rng() < 0.25 ? 1 : 0),
-    0,
-    THEORIES.length - 1,
+      scarce: 0x111111,
+      polarized: 0x222222,
+      anonymous: 0x262626,
+      viral: 0x2f2f2f,
+      bridge: 0x3a3a3a,
+      market: 0x444444,
+    }[scenarioId] + Math.floor(rng() * 0x0f0f0f),
   );
 
   for (let y = 0; y < height; y += 1) {
@@ -566,23 +575,21 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
         : scenarioBias;
       const roll = rng();
       const type = roll < 0.22 ? 'truth' : roll < 0.58 ? 'social' : roll < 0.82 ? 'attention' : 'stubborn';
-      const startLevel = clamp(
-        Math.round(hiddenLevel - 1 + localBias + (rng() < settings.initialSignalRate ? (rng() < settings.initialSignalAccuracy ? 1 : -1) : 0)),
-        0,
-        THEORIES.length - 1,
+      const startIndex = normalizeIndex(
+        hiddenIndex
+        - Math.floor((0.08 + Math.max(0, -localBias) * 0.14) * MAX_THEORY_INDEX)
+        + (rng() < settings.initialSignalRate ? Math.floor((rng() < settings.initialSignalAccuracy ? 1 : -1) * MAX_THEORY_INDEX * 0.015) : 0),
       );
-      const beliefs = THEORIES.map((theory) => clamp(0.12 + (theory.level === startLevel ? 0.52 : 0) + rng() * 0.2, 0.02, 0.92));
       nodes.push({
         id: idx(x, y, width),
         x,
         y,
         community,
-        beliefs,
-        dominantTheory: startLevel,
-        prevDominantTheory: startLevel,
-        confidence: beliefs[startLevel],
+        theoryIndex: startIndex,
+        prevTheoryIndex: startIndex,
+        confidence: clamp(0.45 + rng() * 0.35, 0.2, 0.95),
         message: 0,
-        action: startLevel,
+        action: startIndex,
         reputation: Math.floor(1 + rng() * 4),
         type,
         filter: Math.floor(rng() * 4),
@@ -604,12 +611,11 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
       [cx - 1, cx, cx + 1].forEach((x) => {
         if (x < 0 || x >= width) return;
         const node = nodes[idx(x, y, width)];
-        node.dominantTheory = 1;
-        node.prevDominantTheory = 1;
-        node.beliefs = [0.16, 0.62, 0.16, 0.06];
+        node.theoryIndex = 0x1a1a1a;
+        node.prevTheoryIndex = 0x1a1a1a;
         node.confidence = 0.62;
         node.message = -1;
-        node.action = 1;
+        node.action = node.theoryIndex;
         node.type = 'attention';
         node.reputation = 5;
       });
@@ -622,7 +628,7 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
     width,
     height,
     cellSize,
-    hiddenLevel,
+    hiddenIndex,
     domainRadius: 0.28,
     precision: 0.2,
     frontierPressure: scenarioId === 'bridge' ? 0.22 : 0.12,
@@ -647,11 +653,12 @@ function scenarioSettings(id) {
 
 function generateMessage(node, oldNodes, neighbors, options, rng) {
   if (node.type === 'bot') return -1;
-  const localLevel = neighbors[node.id].reduce((sum, ni) => sum + oldNodes[ni].dominantTheory, 0) / Math.max(1, neighbors[node.id].length);
+  const localIndex = neighbors[node.id].reduce((sum, ni) => sum + oldNodes[ni].theoryIndex, 0) / Math.max(1, neighbors[node.id].length);
+  const delta = localIndex - node.theoryIndex;
   let msg = 0;
   if (node.type === 'checker' || node.type === 'truth') msg = node.anomalyMemory > 1.3 ? 1 : 0;
-  else if (node.type === 'social') msg = Math.abs(localLevel - node.dominantTheory) > 0.55 ? sign(localLevel - node.dominantTheory) : 0;
-  else if (node.type === 'attention') msg = Math.abs(localLevel - node.dominantTheory) > 0.3 ? sign(localLevel - node.dominantTheory) : (rng() < 0.18 ? 1 : 0);
+  else if (node.type === 'social') msg = Math.abs(delta) > MAX_THEORY_INDEX * 0.015 ? sign(delta) : 0;
+  else if (node.type === 'attention') msg = Math.abs(delta) > MAX_THEORY_INDEX * 0.01 ? sign(delta) : (rng() < 0.18 ? 1 : 0);
   else if (node.type === 'stubborn') msg = node.anomalyMemory > 2.8 ? 1 : 0;
   else if (node.type === 'agitator') msg = rng() < 0.75 ? -1 : 1;
   if (options.hotRanking && node.type === 'attention' && rng() < 0.22) msg = rng() < 0.8 ? 1 : -1;
@@ -692,20 +699,20 @@ function stepWorld(world, options, scenarioId) {
 
   const messaged = oldNodes.map((node) => ({
     ...node,
-    prevDominantTheory: node.dominantTheory,
+    prevTheoryIndex: node.theoryIndex,
     message: generateMessage(node, oldNodes, neighbors, options, rng),
   }));
 
   const revealTick = (world.tick + 1) % EVOLUTION_PACE.revealCadence === 0;
-  const hiddenLevel = world.hiddenLevel;
+  const hiddenIndex = world.hiddenIndex;
 
   const nodes = messaged.map((node) => {
     const contextStress = stressAt(node.x, node.y, world);
     let privatePush = 0;
     const baseRate = node.type === 'checker' ? settings.signalRate * 8 : settings.signalRate;
     const rate = baseRate * EVOLUTION_PACE.privateSignal;
-    const privateEvidence = THEORIES.map((theory) => -theoryError(theory.level, contextStress, world.precision, hiddenLevel) - theory.complexity * 0.05);
-    if (rng() < rate && rng() < settings.signalAccuracy) privatePush = 0.1 + (node.type === 'checker' ? 0.12 : 0);
+    const modelError = theoryError(node.theoryIndex, contextStress, world.precision, hiddenIndex);
+    if (rng() < rate && rng() < settings.signalAccuracy) privatePush = sign(hiddenIndex - node.theoryIndex);
 
     const pressure = pressureFor(node, messaged, neighbors, options);
     let threshold = 1.2;
@@ -717,40 +724,33 @@ function stepWorld(world, options, scenarioId) {
     if (node.type === 'bot') threshold = 9;
     threshold *= EVOLUTION_PACE.socialThreshold;
 
-    let socialPush = Math.abs(pressure) >= threshold ? sign(pressure) * 0.1 : 0;
+    let socialPush = Math.abs(pressure) >= threshold ? sign(pressure) : 0;
     if (socialPush !== 0) {
       const adoptionChance = Math.min(0.92, EVOLUTION_PACE.socialAdoption + Math.max(0, Math.abs(pressure) - threshold) * 0.08);
       if (rng() > adoptionChance) socialPush = 0;
     }
     if (node.type === 'stubborn' && socialPush < 0) socialPush = 0;
 
-    let attentionPush = options.hotRanking && node.type === 'attention' && Math.abs(pressure) > 3.1 ? sign(pressure) * 0.12 : 0;
+    let attentionPush = options.hotRanking && node.type === 'attention' && Math.abs(pressure) > 3.1 ? sign(pressure) : 0;
     if (attentionPush !== 0 && rng() > EVOLUTION_PACE.attentionAdoption) attentionPush = 0;
 
-    const beliefs = node.beliefs.map((weight, level) => {
-      const socialTerm = socialPush * (level > node.dominantTheory ? 1 : -0.45);
-      const attentionTerm = attentionPush * (level > node.dominantTheory ? 1 : -0.3);
-      const memoryTerm = node.anomalyMemory > 2 && level >= node.dominantTheory ? 0.08 : 0;
-      return clamp(weight * 0.9 + privateEvidence[level] * 0.26 + socialTerm + attentionTerm + memoryTerm + privatePush, 0.01, 1.4);
-    });
-    const normalizer = beliefs.reduce((sum, value) => sum + value, 0) || 1;
-    const normalizedBeliefs = beliefs.map((value) => value / normalizer);
-    const dominantTheory = normalizedBeliefs.reduce((best, value, level) => (value > normalizedBeliefs[best] ? level : best), 0);
-    const confidence = normalizedBeliefs[dominantTheory];
-    const modelError = theoryError(dominantTheory, contextStress, world.precision, hiddenLevel);
-    let anomalyMemory = clamp((node.anomalyMemory || 0) * 0.9 + modelError * 0.65 + (dominantTheory < hiddenLevel ? 0.16 : -0.08), 0, 6);
+    const anomalyDrive = node.anomalyMemory > 2.4 ? 1 : 0;
+    const netDirection = privatePush + socialPush + attentionPush + anomalyDrive;
+    const stepSize = netDirection === 0 ? 0 : COLOR_STEP;
+    const nextTheoryIndex = normalizeIndex(node.theoryIndex + sign(netDirection) * stepSize);
+    const confidence = clamp(node.confidence * 0.88 + (netDirection !== 0 ? 0.1 : -0.03) + (Math.abs(hiddenIndex - nextTheoryIndex) < Math.abs(hiddenIndex - node.theoryIndex) ? 0.06 : -0.02), 0.05, 0.99);
+    let anomalyMemory = clamp((node.anomalyMemory || 0) * 0.9 + modelError * 0.65 + (nextTheoryIndex < hiddenIndex ? 0.12 : -0.06), 0, 6);
     if (revealTick && (node.checked || rng() < settings.publicEvidenceRate * EVOLUTION_PACE.revealAudience)) anomalyMemory = clamp(anomalyMemory + 0.45, 0, 6);
 
-    const nextAction = dominantTheory;
+    const nextAction = nextTheoryIndex;
     const spent = node.message === 0 ? 0 : node.type === 'attention' || node.type === 'agitator' ? 2 : 1;
     const attention = Math.max(0, Math.round(Math.abs(pressure) + (node.message !== 0 ? 1 : 0)));
     return {
       ...node,
-      beliefs: normalizedBeliefs,
-      dominantTheory,
+      theoryIndex: nextTheoryIndex,
       confidence,
       action: nextAction,
-      lastFlip: dominantTheory !== node.prevDominantTheory ? world.tick + 1 : node.lastFlip,
+      lastFlip: nextTheoryIndex !== node.prevTheoryIndex ? world.tick + 1 : node.lastFlip,
       energy: clamp(node.energy - spent + (attention >= 3 ? 1 : 0), 0, 9),
       attention,
       anomalyMemory,
@@ -761,7 +761,7 @@ function stepWorld(world, options, scenarioId) {
     let rewarded = 0;
     let punished = 0;
     nodes.forEach((node) => {
-      const nearTruth = Math.abs(node.dominantTheory - hiddenLevel) <= 0.5;
+      const nearTruth = Math.abs(node.theoryIndex - hiddenIndex) <= MAX_THEORY_INDEX * 0.015;
       const saidTruth = node.message > 0 && nearTruth;
       const saidFalse = node.message > 0 && !nearTruth;
       if (saidTruth) {
@@ -782,7 +782,7 @@ function stepWorld(world, options, scenarioId) {
         if (node.type === 'attention') node.type = 'truth';
         node.checked = true;
       }
-      if (node.dominantTheory !== node.prevDominantTheory && Math.abs(node.dominantTheory - node.prevDominantTheory) >= 2) {
+      if (node.theoryIndex !== node.prevTheoryIndex && Math.abs(node.theoryIndex - node.prevTheoryIndex) >= 4000) {
         node.reputation = clamp(node.reputation - 1, 0, 9);
       }
     });
@@ -790,10 +790,10 @@ function stepWorld(world, options, scenarioId) {
   }
 
   const avgAnomaly = nodes.reduce((sum, node) => sum + node.anomalyMemory, 0) / Math.max(1, nodes.length);
-  let nextHiddenLevel = hiddenLevel;
+  let nextHiddenIndex = hiddenIndex;
   let paradigmShiftCount = world.paradigmShiftCount;
-  if (avgAnomaly > 2.45 && hiddenLevel < THEORIES.length - 1 && (world.tick + 1) % 8 === 0) {
-    nextHiddenLevel += 1;
+  if (avgAnomaly > 2.45 && hiddenIndex < MAX_THEORY_INDEX && (world.tick + 1) % 8 === 0) {
+    nextHiddenIndex = normalizeIndex(hiddenIndex + COLOR_STEP);
     paradigmShiftCount += 1;
     event = { key: 'bridge' };
   }
@@ -801,7 +801,7 @@ function stepWorld(world, options, scenarioId) {
   return {
     ...world,
     tick: world.tick + 1,
-    hiddenLevel: nextHiddenLevel,
+    hiddenIndex: nextHiddenIndex,
     paradigmShiftCount,
     domainRadius: clamp(world.domainRadius + 0.0025, 0, 1),
     precision: clamp(world.precision + 0.002, 0, 1),
@@ -814,18 +814,18 @@ function stepWorld(world, options, scenarioId) {
 function getMetrics(world) {
   const total = world.nodes.length || 1;
   const predictionAccuracy = 1 - world.nodes.reduce((sum, node) => (
-    sum + theoryError(node.dominantTheory, stressAt(node.x, node.y, world), world.precision, world.hiddenLevel)
+    sum + theoryError(node.theoryIndex, stressAt(node.x, node.y, world), world.precision, world.hiddenIndex)
   ), 0) / total;
   const active = world.nodes.filter((n) => n.message !== 0).length / total;
   const avgRep = world.nodes.reduce((sum, n) => sum + n.reputation, 0) / total;
   const communityMeans = [0, 1, 2, 3].map((c) => {
     const list = world.nodes.filter((n) => n.community === c);
-    return list.length ? list.reduce((sum, n) => sum + n.dominantTheory, 0) / list.length : 0;
+    return list.length ? list.reduce((sum, n) => sum + n.theoryIndex, 0) / list.length : 0;
   });
   const globalMean = communityMeans.reduce((sum, v) => sum + v, 0) / 4;
-  const polarization = communityMeans.reduce((sum, v) => sum + (v - globalMean) ** 2, 0) / 4 / (THEORIES.length - 1) ** 2;
-  const scope = world.nodes.reduce((sum, n) => sum + THEORIES[n.dominantTheory].scope, 0) / total;
-  const depth = world.nodes.reduce((sum, n) => sum + n.dominantTheory, 0) / total / (THEORIES.length - 1);
+  const polarization = communityMeans.reduce((sum, v) => sum + (v - globalMean) ** 2, 0) / 4 / (MAX_THEORY_INDEX ** 2);
+  const scope = world.nodes.reduce((sum, n) => sum + (0.22 + 0.78 * Math.pow(indexDepth(n.theoryIndex), 0.8)), 0) / total;
+  const depth = world.nodes.reduce((sum, n) => sum + indexDepth(n.theoryIndex), 0) / total;
   const anomaly = world.nodes.reduce((sum, n) => sum + n.anomalyMemory, 0) / total / 4;
   return { predictionAccuracy: clamp(predictionAccuracy, 0, 1), active, avgRep, polarization, scope, depth, anomaly: clamp(anomaly, 0, 1) };
 }
@@ -835,11 +835,10 @@ function applyIntervention(world, kind, targetId) {
   const node = nodes[targetId ?? Math.floor(world.rng() * nodes.length)];
   if (!node) return world;
   if (kind === 'seedTrue') {
-    node.dominantTheory = world.hiddenLevel;
-    node.beliefs = THEORIES.map((_, level) => (level === world.hiddenLevel ? 0.72 : 0.09));
+    node.theoryIndex = world.hiddenIndex;
     node.confidence = 0.72;
     node.message = 1;
-    node.action = world.hiddenLevel;
+    node.action = world.hiddenIndex;
     node.energy = 9;
     node.reputation = clamp(node.reputation + 1, 0, 9);
   }
@@ -847,31 +846,28 @@ function applyIntervention(world, kind, targetId) {
     node.type = 'checker';
     node.checked = true;
     node.reputation = 7;
-    node.dominantTheory = world.hiddenLevel;
-    node.beliefs = THEORIES.map((_, level) => (level === world.hiddenLevel ? 0.78 : 0.07));
+    node.theoryIndex = world.hiddenIndex;
     node.confidence = 0.78;
     node.message = 1;
-    node.action = world.hiddenLevel;
+    node.action = world.hiddenIndex;
   }
   if (kind === 'bot') {
     node.type = 'bot';
     node.reputation = 5;
     node.energy = 9;
-    node.dominantTheory = Math.max(0, world.hiddenLevel - 1);
-    node.beliefs = THEORIES.map((_, level) => (level === node.dominantTheory ? 0.76 : 0.08));
+    node.theoryIndex = normalizeIndex(world.hiddenIndex - 4000);
     node.confidence = 0.76;
     node.message = -1;
-    node.action = node.dominantTheory;
+    node.action = node.theoryIndex;
   }
   if (kind === 'agitator') {
     node.type = 'agitator';
     node.reputation = 4;
     node.energy = 9;
-    node.dominantTheory = node.dominantTheory >= world.hiddenLevel ? 0 : THEORIES.length - 1;
-    node.beliefs = THEORIES.map((_, level) => (level === node.dominantTheory ? 0.75 : 0.08));
+    node.theoryIndex = node.theoryIndex >= world.hiddenIndex ? 0 : MAX_THEORY_INDEX;
     node.confidence = 0.75;
-    node.message = node.dominantTheory > world.hiddenLevel ? 1 : -1;
-    node.action = node.dominantTheory;
+    node.message = node.theoryIndex > world.hiddenIndex ? 1 : -1;
+    node.action = node.theoryIndex;
   }
   return {
     ...world,
@@ -928,15 +924,14 @@ function CellCanvas({ world, selected, onSelect }) {
     ctx.fillRect(0, 0, widthPx, heightPx);
 
     world.nodes.forEach((node) => {
-      const baseColor = THEORIES[node.dominantTheory].color;
+      const baseColor = indexToColor(node.theoryIndex);
       const brightness = 0.52 + node.confidence * 0.58;
       ctx.fillStyle = baseColor;
       ctx.globalAlpha = brightness;
       ctx.fillRect(node.x * cell + 0.5, node.y * cell + 0.5, cell - 1, cell - 1);
       ctx.globalAlpha = 1;
-      if (node.dominantTheory > 0) {
-        const parentColor = THEORIES[node.dominantTheory - 1].color;
-        ctx.fillStyle = parentColor;
+      if (node.theoryIndex > 0) {
+        ctx.fillStyle = indexToColor(node.theoryIndex - COLOR_STEP);
         ctx.globalAlpha = 0.72;
         ctx.beginPath();
         ctx.arc(node.x * cell + cell * 0.5, node.y * cell + cell * 0.5, Math.max(1, cell * 0.14), 0, Math.PI * 2);
@@ -1203,7 +1198,7 @@ function App() {
                 <div className="node-grid">
                   <span>{copy.node.coord}</span><strong>{selectedNode.x + 1}, {selectedNode.y + 1}</strong>
                   <span>{copy.node.type}</span><strong>{copy.types[selectedNode.type]}</strong>
-                  <span>{copy.node.belief}</span><strong>{THEORIES[selectedNode.dominantTheory].id}</strong>
+                  <span>{copy.node.belief}</span><strong>{indexToColor(selectedNode.theoryIndex)}</strong>
                   <span>{copy.node.message}</span><strong>{selectedNode.message}</strong>
                   <span>{copy.node.action}</span><strong>{Math.round(selectedNode.confidence * 100)}%</strong>
                   <span>{copy.node.reputation}</span><strong>{selectedNode.reputation}</strong>
@@ -1254,7 +1249,7 @@ function App() {
             <div className="truth-strip">
               <div>
                 <Target size={18} />
-                <span>{copy.strip.truth} {THEORIES[world.hiddenLevel].id}</span>
+                <span>{copy.strip.truth} {indexToColor(world.hiddenIndex)}</span>
               </div>
               <div>
                 <Activity size={18} />
@@ -1267,11 +1262,11 @@ function App() {
             </div>
 
             <div className="legend">
-              <span><i className="c neutral" />Folk</span>
-              <span><i className="c mint" />Classical</span>
-              <span><i className="c purple" />Relativity-like</span>
-              <span><i className="c gold" />Frontier</span>
-              <span><i className="ring" />Core + anomaly + reputation ring</span>
+              <span><i className="c neutral" />#000000 起点</span>
+              <span><i className="c mint" />连续色阶上升</span>
+              <span><i className="c purple" />每次更新前进 1 色阶</span>
+              <span><i className="c gold" />#FFFFFF 终点</span>
+              <span><i className="ring" />中心点=上一色阶</span>
             </div>
           </section>
 
