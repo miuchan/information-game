@@ -1047,7 +1047,14 @@ function App() {
     function handleResize() {
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
-        setDimensions(viewportGrid());
+        const next = viewportGrid();
+        const widthChanged = next.width !== dimensions.width;
+        const heightDelta = Math.abs(next.height - dimensions.height);
+        const shouldRebuildWorld = widthChanged || heightDelta >= 4;
+        if (!shouldRebuildWorld) return;
+        setDimensions(next);
+        setWorld(createWorld(Date.now(), scenario, next));
+        setSelected(null);
       }, 180);
     }
     window.addEventListener('resize', handleResize);
@@ -1055,7 +1062,7 @@ function App() {
       clearTimeout(resizeTimer);
       window.removeEventListener('resize', handleResize);
     };
-  }, []);
+  }, [dimensions, scenario]);
 
   useEffect(() => {
     if (!running) return undefined;
