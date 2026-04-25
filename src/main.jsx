@@ -468,6 +468,7 @@ const CHUNK_SIZE = 32;
 const ANOMALY_GAIN = 42;
 const TIME_SCALES = [1, 4, 16, 64, 256];
 const UI_SYNC_INTERVAL_MS = 180;
+const SPECULATION_WINDOW = Math.floor(PHASES * 0.75);
 const colorCache = new Map();
 
 function normalizeIndex(value) {
@@ -602,6 +603,10 @@ function chunkIndexFor(x, y, world) {
   const cx = Math.floor(x / CHUNK_SIZE);
   const cy = Math.floor(y / CHUNK_SIZE);
   return cy * chunkCols + cx;
+}
+
+function cognitiveCeilingFromExposure(exposureFrontierRank) {
+  return Math.min(MAX_THEORY_INDEX, normalizeIndex(exposureFrontierRank + SPECULATION_WINDOW));
 }
 
 function viewportGrid() {
@@ -842,6 +847,7 @@ function stepWorld(world, options, scenarioId) {
   const currentMaxTheoryIndex = oldNodes.reduce((max, node) => Math.max(max, node.theoryIndex), 0);
   const socialFrontier = percentile(oldNodes.map((node) => node.theoryIndex), 0.95);
   const exposureFrontier = Math.min(frontier, socialFrontier + PARADIGM_JUMP * 2);
+  const cognitiveCeiling = cognitiveCeilingFromExposure(exposureFrontier);
   const { chunkCols, chunkRows } = chunkMeta(world);
   const chunkBiasRank = new Float32Array(world.chunkBiasRank || chunkCols * chunkRows);
   for (let cy = 0; cy < chunkRows; cy += 1) {
@@ -960,6 +966,7 @@ function stepWorld(world, options, scenarioId) {
       + (anomalyMemory > 2.5 ? 4 : 0)
       + (translation > 1 ? 2 : 0);
     if (microLearnGain > 0) nextTheoryIndex = normalizeIndex(nextTheoryIndex + microLearnGain);
+    nextTheoryIndex = Math.min(nextTheoryIndex, cognitiveCeiling);
 
     const nextAction = nextTheoryIndex;
     const spent = node.message === 0 ? 0 : node.type === 'attention' || node.type === 'agitator' ? 2 : 1;
@@ -1070,12 +1077,17 @@ function getMetrics(world) {
   const changedCellsRate = changed.length / total;
   const avgDeltaPerChanged = changed.length ? changed.reduce((sum, value) => sum + value, 0) / changed.length : 0;
   const learningVelocity = clamp(changedCellsRate * (avgDeltaPerChanged / Math.max(1, PARADIGM_JUMP * 1.5)), 0, 1);
-  const socialFrontier = world.socialFrontierRank ?? percentile(world.nodes.map((n) => n.theoryIndex), 0.95);
-  const exposureFrontier = world.exposureFrontierRank ?? Math.min(world.frontier ?? world.hiddenIndex, socialFrontier + PARADIGM_JUMP * 2);
+  const rawSocialFrontier = world.socialFrontierRank ?? percentile(world.nodes.map((n) => n.theoryIndex), 0.95);
+  const exposureFrontier = world.exposureFrontierRank ?? Math.min(world.frontier ?? world.hiddenIndex, rawSocialFrontier + PARADIGM_JUMP * 2);
+  const validatedCeiling = cognitiveCeilingFromExposure(exposureFrontier);
+  const validatedNodes = world.nodes.filter((n) => n.theoryIndex <= validatedCeiling && n.confidence >= 0.45);
+  const socialFrontier = validatedNodes.length
+    ? percentile(validatedNodes.map((n) => n.theoryIndex), 0.95)
+    : Math.min(rawSocialFrontier, validatedCeiling);
   const frontierGap = clamp((world.hiddenIndex - socialFrontier) / (PHASES * 2), 0, 1);
   const speculativeOrder = orderOf(world.nodes.reduce((max, n) => Math.max(max, n.theoryIndex), 0));
   const highestStableOrder = orderOf(socialFrontier);
-  const outlierRate = world.nodes.filter((n) => n.theoryIndex > socialFrontier + PARADIGM_JUMP * 2).length / total;
+  const outlierRate = world.nodes.filter((n) => n.theoryIndex > validatedCeiling).length / total;
   const orderSkylineCounts = new Array(ORDERS).fill(0);
   world.nodes.forEach((node) => {
     orderSkylineCounts[orderOf(node.theoryIndex)] += 1;
@@ -1100,6 +1112,7 @@ function getMetrics(world) {
     highestStableOrder,
     speculativeOrder,
     outlierRate: clamp(outlierRate, 0, 1),
+    validatedCeiling,
     socialFrontier,
     exposureFrontier,
     orderSkyline,
@@ -1206,6 +1219,8 @@ function CellCanvas({
     const minY = clamp(Math.floor(camera.y), 0, world.height - 1);
     const maxX = clamp(Math.ceil(camera.x + widthPx / cell), 0, world.width - 1);
     const maxY = clamp(Math.ceil(camera.y + heightPx / cell), 0, world.height - 1);
+    const renderDetail = cell >= 12 ? 'full-detail' : cell >= 6 ? 'cell-fill' : 'coarse';
+    const renderCeiling = cognitiveCeilingFromExposure(world.exposureFrontierRank ?? world.hiddenIndex);
 
     for (let y = minY; y <= maxY; y += 1) {
       for (let x = minX; x <= maxX; x += 1) {
@@ -1214,7 +1229,8 @@ function CellCanvas({
         const sx = (node.x - camera.x) * cell;
         const sy = (node.y - camera.y) * cell;
         if (sx + cell < 0 || sy + cell < 0 || sx > widthPx || sy > heightPx) continue;
-        const visibleIndex = visualIndex(node.theoryIndex);
+        const validatedIndex = Math.min(node.theoryIndex, renderCeiling);
+        const visibleIndex = visualIndex(validatedIndex);
         const baseColor = indexToColor(visibleIndex);
         const brightness = 0.52 + node.confidence * 0.58;
         ctx.fillStyle = baseColor;
@@ -1222,7 +1238,7 @@ function CellCanvas({
         const fillInset = cell >= 6 ? 0.5 : 0;
         ctx.fillRect(sx + fillInset, sy + fillInset, Math.max(1, cell - fillInset * 2), Math.max(1, cell - fillInset * 2));
         ctx.globalAlpha = 1;
-        if (visibleIndex > 0 && cell >= 8) {
+        if (renderDetail === 'full-detail' && visibleIndex > 0 && cell >= 8 && orderOf(validatedIndex) < 64) {
           ctx.fillStyle = indexToColor(Math.max(0, visibleIndex - Math.floor(MAX_THEORY_INDEX / VISUAL_BANDS)));
           ctx.globalAlpha = 0.72;
           ctx.beginPath();
@@ -1230,7 +1246,7 @@ function CellCanvas({
           ctx.fill();
           ctx.globalAlpha = 1;
         }
-        if (node.message !== 0 && cell >= 8) {
+        if (renderDetail === 'full-detail' && node.message !== 0 && cell >= 8 && orderOf(validatedIndex) < 64) {
           ctx.fillStyle = node.message > 0 ? '#f3fbff' : '#ffe7e1';
           ctx.globalAlpha = 0.75;
           ctx.beginPath();
@@ -1238,16 +1254,16 @@ function CellCanvas({
           ctx.fill();
           ctx.globalAlpha = 1;
         }
-        if (node.productiveSignal > 0.55 && cell >= 7) {
+        if (renderDetail === 'full-detail' && node.productiveSignal > 0.55 && cell >= 7 && orderOf(validatedIndex) < 64) {
           ctx.strokeStyle = indexToColor(Math.min(MAX_THEORY_INDEX, visibleIndex + Math.floor(MAX_THEORY_INDEX / VISUAL_BANDS)));
           ctx.lineWidth = Math.max(1, cell * 0.09);
           ctx.strokeRect(sx + 1.5, sy + 1.5, cell - 3, cell - 3);
-        } else if (node.confusionMemory > 1.4 && cell >= 7) {
+        } else if (renderDetail === 'full-detail' && node.confusionMemory > 1.4 && cell >= 7 && orderOf(validatedIndex) < 64) {
           ctx.strokeStyle = 'rgba(70,70,70,.55)';
           ctx.lineWidth = Math.max(1, cell * 0.08);
           ctx.strokeRect(sx + 2, sy + 2, cell - 4, cell - 4);
         }
-        if ((node.reputation >= 6 || node.type === 'checker' || node.type === 'bot') && cell >= 9) {
+        if (renderDetail === 'full-detail' && (node.reputation >= 6 || node.type === 'checker' || node.type === 'bot') && cell >= 9 && orderOf(validatedIndex) < 64) {
           ctx.strokeStyle = node.type === 'checker' ? '#f1c84c' : node.type === 'bot' ? '#7b5cf0' : 'rgba(255,255,255,.7)';
           ctx.lineWidth = Math.max(1, cell * 0.12);
           ctx.strokeRect(sx + 1, sy + 1, cell - 2, cell - 2);
@@ -1677,7 +1693,7 @@ function App() {
               </div>
               <div>
                 <Activity size={18} />
-                <span>{copy.strip.tick} {worldView.tick} · H:{orderOf(worldView.hiddenIndex)} / S:{orderOf(metrics.socialFrontier)} / E:{orderOf(metrics.exposureFrontier)} · {timeScale}× · {diagnosticState}</span>
+                <span>{copy.strip.tick} {worldView.tick} · H:{orderOf(worldView.hiddenIndex)} / S:{orderOf(metrics.socialFrontier)} / E:{orderOf(metrics.exposureFrontier)} · C:{orderOf(metrics.validatedCeiling)} · {timeScale}× · {diagnosticState}</span>
               </div>
               <div>
                 <Zap size={18} />
