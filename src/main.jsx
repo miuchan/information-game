@@ -464,6 +464,8 @@ const MAX_THEORY_INDEX = PHASES * ORDERS - 1;
 const COLOR_STEP = 1;
 const VISUAL_BANDS = 256;
 const PARADIGM_JUMP = 128;
+const CHUNK_SIZE = 32;
+const ANOMALY_GAIN = 42;
 const colorCache = new Map();
 
 function normalizeIndex(value) {
@@ -486,8 +488,8 @@ function indexToColor(value) {
   const index = normalizeIndex(value);
   if (colorCache.has(index)) return colorCache.get(index);
   const s = phaseOf(index) / (PHASES - 1);
-  const lightness = 0.18 + 0.78 * Math.pow(s, 0.92);
-  const chroma = 0.03 + 0.12 * (Math.sin(Math.PI * s) ** 2);
+  const lightness = 0.30 + 0.62 * Math.pow(s, 0.85);
+  const chroma = 0.07 + 0.13 * (Math.sin(Math.PI * s) ** 2);
   const hueDeg = (260 + 360 * 7 * s) % 360;
   const hueRad = (hueDeg * Math.PI) / 180;
   const a = chroma * Math.cos(hueRad);
@@ -587,6 +589,19 @@ function percentile(values, p) {
   return sorted[Math.floor((sorted.length - 1) * clamp(p, 0, 1))];
 }
 
+function chunkMeta(world) {
+  const chunkCols = Math.ceil(world.width / CHUNK_SIZE);
+  const chunkRows = Math.ceil(world.height / CHUNK_SIZE);
+  return { chunkCols, chunkRows };
+}
+
+function chunkIndexFor(x, y, world) {
+  const { chunkCols } = chunkMeta(world);
+  const cx = Math.floor(x / CHUNK_SIZE);
+  const cy = Math.floor(y / CHUNK_SIZE);
+  return cy * chunkCols + cx;
+}
+
 function viewportGrid() {
   if (typeof window === 'undefined') return { width: WORLD_WIDTH, height: WORLD_HEIGHT, cellSize: 10 };
   return {
@@ -665,6 +680,14 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
       market: makeRank(1, 1600),
     }[scenarioId] + Math.floor(rng() * 320),
   );
+  const { chunkCols, chunkRows } = chunkMeta({ width, height });
+  const chunkBiasRank = new Float32Array(chunkCols * chunkRows);
+  for (let cy = 0; cy < chunkRows; cy += 1) {
+    for (let cx = 0; cx < chunkCols; cx += 1) {
+      const i = cy * chunkCols + cx;
+      chunkBiasRank[i] = clamp(hiddenIndex + (rng() - 0.5) * PHASES * 0.35, 0, MAX_THEORY_INDEX);
+    }
+  }
 
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
@@ -736,6 +759,7 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
     precision: 0.2,
     frontierPressure: scenarioId === 'bridge' ? 0.22 : 0.12,
     paradigmShiftCount: 0,
+    chunkBiasRank,
     tick: 0,
     nodes,
     neighbors: buildNeighbors(rng, width, height, true),
@@ -816,6 +840,16 @@ function stepWorld(world, options, scenarioId) {
   const currentMaxTheoryIndex = oldNodes.reduce((max, node) => Math.max(max, node.theoryIndex), 0);
   const socialFrontier = percentile(oldNodes.map((node) => node.theoryIndex), 0.95);
   const exposureFrontier = Math.min(frontier, socialFrontier + PARADIGM_JUMP * 2);
+  const { chunkCols, chunkRows } = chunkMeta(world);
+  const chunkBiasRank = new Float32Array(world.chunkBiasRank || chunkCols * chunkRows);
+  for (let cy = 0; cy < chunkRows; cy += 1) {
+    for (let cx = 0; cx < chunkCols; cx += 1) {
+      const ci = cy * chunkCols + cx;
+      const chunkNoise = (hash2(cx, cy, Math.floor(world.tick * 0.02) + world.seed) - 0.5) * PHASES * 0.35;
+      const target = exposureFrontier + chunkNoise;
+      chunkBiasRank[ci] = clamp(chunkBiasRank[ci] * 0.96 + target * 0.04, 0, MAX_THEORY_INDEX);
+    }
+  }
   const frontierLagWindow = 220;
   const frontierNeighborWindow = 180;
   const breakthroughThreshold = 1.15;
@@ -827,10 +861,12 @@ function stepWorld(world, options, scenarioId) {
     const baseRate = node.type === 'checker' ? settings.signalRate * 8 : settings.signalRate;
     const rate = baseRate * EVOLUTION_PACE.privateSignal;
     const frontierMix = clamp(0.1 + world.frontierPressure * 0.32, 0.08, 0.45);
-    const frontierBand = Math.max(8, Math.floor(MAX_THEORY_INDEX * 0.07));
+    const frontierBand = Math.max(8, Math.floor(PHASES * 0.18));
+    const chunkBias = chunkBiasRank[chunkIndexFor(node.x, node.y, world)] ?? exposureFrontier;
+    const localTarget = 0.65 * chunkBias + 0.35 * exposureFrontier;
     const challengeDifficulty = rng() < frontierMix
-      ? normalizeIndex(exposureFrontier - Math.floor(rng() * frontierBand))
-      : Math.floor(rng() * Math.max(1, exposureFrontier - frontierBand));
+      ? normalizeIndex(localTarget + (rng() - 0.5) * frontierBand)
+      : Math.floor(rng() * Math.max(1, localTarget));
     const neighborhoodAvg = neighbors[node.id].reduce((sum, ni) => sum + messaged[ni].theoryIndex, 0) / Math.max(1, neighbors[node.id].length);
     const challengeGap = challengeDifficulty - node.theoryIndex;
     const rawGap = Math.max(0, challengeGap);
@@ -870,7 +906,7 @@ function stepWorld(world, options, scenarioId) {
     const stepSize = netDirection === 0 ? 0 : adaptiveStep * COLOR_STEP;
     let nextTheoryIndex = normalizeIndex(node.theoryIndex + sign(netDirection) * stepSize);
     const confidence = clamp(node.confidence * 0.88 + (netDirection !== 0 ? 0.1 : -0.03) + (Math.abs(hiddenIndex - nextTheoryIndex) < Math.abs(hiddenIndex - node.theoryIndex) ? 0.06 : -0.02) - (overwhelmed ? 0.08 : 0), 0.05, 0.99);
-    let anomalyMemory = clamp((node.anomalyMemory || 0) * 0.92 + productive * (0.8 + Math.min(0.4, (node.exposureDepth || 0) * 0.1)), 0, 6);
+    let anomalyMemory = clamp((node.anomalyMemory || 0) * 0.92 + productive * ANOMALY_GAIN * 0.02 * (0.8 + Math.min(0.4, (node.exposureDepth || 0) * 0.1)), 0, 6);
     let confusionMemory = clamp((node.confusionMemory || 0) * 0.94 + confusion, 0, 6);
     let translation = clamp((node.translation || 0) * 0.9, 0, 6);
     const exposureDepth = clamp((node.exposureDepth || 0) * 0.9 + challengeDifficulty / MAX_THEORY_INDEX, 0, 4);
@@ -878,7 +914,7 @@ function stepWorld(world, options, scenarioId) {
     const lagToMax = currentMaxTheoryIndex - node.theoryIndex;
     const closeToFrontier = lagToMax >= 0 && lagToMax <= frontierLagWindow;
     const frontierContact = neighbors[node.id].some((ni) => messaged[ni].theoryIndex >= currentMaxTheoryIndex - frontierNeighborWindow);
-    if (confusionMemory > 1.8 && frontierContact) {
+    if ((confusionMemory > 1.2 || anomalyMemory > 1.8 || currentMaxTheoryIndex - node.theoryIndex > 96) && frontierContact) {
       const translatorNearby = neighbors[node.id].some(
         (ni) => messaged[ni].theoryIndex > node.theoryIndex && (messaged[ni].reputation || 0) >= 5,
       );
@@ -890,8 +926,8 @@ function stepWorld(world, options, scenarioId) {
     }
     const interpretableConfusion = confusionMemory < confusionLimit || (frontierContact && anomalyMemory > breakthroughThreshold * 1.4);
     const canBreakthrough = closeToFrontier
-      && anomalyMemory > breakthroughThreshold
-      && (node.openness || 0) > 0.4
+      && anomalyMemory > (breakthroughThreshold * 0.8)
+      && (node.openness || 0) > 0.34
       && interpretableConfusion
       && frontierContact;
     if (canBreakthrough) {
@@ -971,6 +1007,7 @@ function stepWorld(world, options, scenarioId) {
     frontier: nextFrontier,
     socialFrontierRank: socialFrontier,
     exposureFrontierRank: exposureFrontier,
+    chunkBiasRank,
     paradigmShiftCount,
     domainRadius: clamp(world.domainRadius + 0.0025, 0, 1),
     precision: clamp(world.precision + 0.002, 0, 1),
