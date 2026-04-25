@@ -6,6 +6,16 @@ Info Cells is an interactive social cellular automaton for studying how informat
 
 The project implements a deliberately small model: instead of simulating full Bayesian inference or a full economic game, it compresses those ideas into local, discrete, synchronous rules. The result is a playable system that can produce opinion clusters, echo chambers, misinformation cascades, reputation hubs, and polarization boundaries without scripting those patterns in advance.
 
+## Rule Updates (Current Version)
+
+To make recent gameplay tuning explicit, the current rules include:
+
+- **Stronger private truth feedback**: private signals now arrive more often and with higher accuracy than earlier versions.
+- **Fact-check reveal push**: during reveal rounds, a subset of nodes receives extra truth-direction pressure.
+- **Short evidence memory**: nodes accumulate private evidence over short windows; if evidence is strong enough, they temporarily discount social pressure.
+- **Sharper practical reputation effects**: reputation visibility has a lower baseline weight but steeper slope, so repeatedly penalized nodes lose influence faster.
+- **Light skepticism / forgetting**: extremely certain nodes can occasionally step back by one belief level to reduce irreversible lock-in.
+
 ## Quick Start
 
 ```bash
