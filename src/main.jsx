@@ -1048,6 +1048,10 @@ function App() {
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         const next = viewportGrid();
+        const widthChanged = next.width !== dimensions.width;
+        const heightDelta = Math.abs(next.height - dimensions.height);
+        const shouldRebuildWorld = widthChanged || heightDelta >= 4;
+        if (!shouldRebuildWorld) return;
         setDimensions(next);
         setWorld(createWorld(Date.now(), scenario, next));
         setSelected(null);
@@ -1058,7 +1062,7 @@ function App() {
       clearTimeout(resizeTimer);
       window.removeEventListener('resize', handleResize);
     };
-  }, [scenario]);
+  }, [dimensions, scenario]);
 
   useEffect(() => {
     if (!running) return undefined;
