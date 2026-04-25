@@ -102,6 +102,10 @@ const REFERENCES = [
     title: 'Kahneman, D., Slovic, P. & Tversky, A. (1982). Judgment under Uncertainty',
     url: 'https://books.google.com/books/about/Judgment_Under_Uncertainty.html?id=_0H8gwj4a1MC',
   },
+  {
+    title: 'Kuhn, T. S. (1962). The Structure of Scientific Revolutions',
+    url: 'https://press.uchicago.edu/ucp/books/book/chicago/S/bo13179781.html',
+  },
 ];
 
 const COPY = {
@@ -452,20 +456,34 @@ const EVOLUTION_PACE = {
   weakPushAdoption: 0.6,
 };
 
-const MAX_THEORY_INDEX = 8191;
+const PHASES = 8192;
+const ORDERS = 128;
+const MAX_THEORY_INDEX = PHASES * ORDERS - 1;
 const COLOR_STEP = 1;
 const VISUAL_BANDS = 256;
-const PARADIGM_JUMP = Math.max(48, Math.floor(MAX_THEORY_INDEX * 0.012));
+const PARADIGM_JUMP = 128;
 const colorCache = new Map();
 
 function normalizeIndex(value) {
   return clamp(Math.round(value), 0, MAX_THEORY_INDEX);
 }
 
+function phaseOf(rank) {
+  return normalizeIndex(rank) % PHASES;
+}
+
+function orderOf(rank) {
+  return Math.floor(normalizeIndex(rank) / PHASES);
+}
+
+function makeRank(order, phase) {
+  return normalizeIndex(order * PHASES + phase);
+}
+
 function indexToColor(value) {
   const index = normalizeIndex(value);
   if (colorCache.has(index)) return colorCache.get(index);
-  const s = index / MAX_THEORY_INDEX;
+  const s = phaseOf(index) / (PHASES - 1);
   const lightness = 0.18 + 0.78 * Math.pow(s, 0.92);
   const chroma = 0.03 + 0.12 * (Math.sin(Math.PI * s) ** 2);
   const hueDeg = (260 + 360 * 7 * s) % 360;
@@ -637,13 +655,13 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
   }[scenarioId];
   const hiddenIndex = normalizeIndex(
     {
-      scarce: 620,
-      polarized: 940,
-      anonymous: 1120,
-      viral: 1280,
-      bridge: 1520,
-      market: 1680,
-    }[scenarioId] + Math.floor(rng() * 240),
+      scarce: makeRank(0, 2400),
+      polarized: makeRank(0, 3200),
+      anonymous: makeRank(0, 3600),
+      viral: makeRank(0, 4100),
+      bridge: makeRank(1, 900),
+      market: makeRank(1, 1600),
+    }[scenarioId] + Math.floor(rng() * 320),
   );
 
   for (let y = 0; y < height; y += 1) {
@@ -681,6 +699,7 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
         openness: clamp(0.25 + rng() * 0.65, 0, 1),
         confusionMemory: 0,
         productiveSignal: 0,
+        translation: 0,
         exposureDepth: 0,
         anomalyMemory: rng() * 0.4,
         accuracyStreak: 0,
@@ -851,11 +870,22 @@ function stepWorld(world, options, scenarioId) {
     const confidence = clamp(node.confidence * 0.88 + (netDirection !== 0 ? 0.1 : -0.03) + (Math.abs(hiddenIndex - nextTheoryIndex) < Math.abs(hiddenIndex - node.theoryIndex) ? 0.06 : -0.02) - (overwhelmed ? 0.08 : 0), 0.05, 0.99);
     let anomalyMemory = clamp((node.anomalyMemory || 0) * 0.92 + productive * (0.8 + Math.min(0.4, (node.exposureDepth || 0) * 0.1)), 0, 6);
     let confusionMemory = clamp((node.confusionMemory || 0) * 0.94 + confusion, 0, 6);
+    let translation = clamp((node.translation || 0) * 0.9, 0, 6);
     const exposureDepth = clamp((node.exposureDepth || 0) * 0.9 + challengeDifficulty / MAX_THEORY_INDEX, 0, 4);
 
     const lagToMax = currentMaxTheoryIndex - node.theoryIndex;
     const closeToFrontier = lagToMax >= 0 && lagToMax <= frontierLagWindow;
     const frontierContact = neighbors[node.id].some((ni) => messaged[ni].theoryIndex >= currentMaxTheoryIndex - frontierNeighborWindow);
+    if (confusionMemory > 1.8 && frontierContact) {
+      const translatorNearby = neighbors[node.id].some(
+        (ni) => messaged[ni].theoryIndex > node.theoryIndex && (messaged[ni].reputation || 0) >= 5,
+      );
+      if (translatorNearby) {
+        confusionMemory = clamp(confusionMemory * 0.72, 0, 6);
+        anomalyMemory = clamp(anomalyMemory + 0.32, 0, 6);
+        translation = clamp(translation + 0.4, 0, 6);
+      }
+    }
     const interpretableConfusion = confusionMemory < confusionLimit || (frontierContact && anomalyMemory > breakthroughThreshold * 1.4);
     const canBreakthrough = closeToFrontier
       && anomalyMemory > breakthroughThreshold
@@ -866,6 +896,7 @@ function stepWorld(world, options, scenarioId) {
       nextTheoryIndex = Math.min(MAX_THEORY_INDEX, Math.max(nextTheoryIndex, currentMaxTheoryIndex + Math.floor(PARADIGM_JUMP / 2)));
       anomalyMemory *= 0.25;
       confusionMemory *= 0.5;
+      translation = clamp(translation + 0.8, 0, 6);
     }
     if (revealTick && (node.checked || rng() < settings.publicEvidenceRate * EVOLUTION_PACE.revealAudience)) anomalyMemory = clamp(anomalyMemory + 0.45, 0, 6);
 
@@ -884,6 +915,7 @@ function stepWorld(world, options, scenarioId) {
       anomalyMemory,
       confusionMemory,
       productiveSignal: productive,
+      translation,
       exposureDepth,
     };
   });
@@ -935,6 +967,8 @@ function stepWorld(world, options, scenarioId) {
     tick: world.tick + 1,
     hiddenIndex: nextHiddenIndex,
     frontier: nextFrontier,
+    socialFrontierRank: socialFrontier,
+    exposureFrontierRank: exposureFrontier,
     paradigmShiftCount,
     domainRadius: clamp(world.domainRadius + 0.0025, 0, 1),
     precision: clamp(world.precision + 0.002, 0, 1),
@@ -961,6 +995,13 @@ function getMetrics(world) {
   const depth = world.nodes.reduce((sum, n) => sum + indexDepth(n.theoryIndex), 0) / total;
   const meanIndex = world.nodes.reduce((sum, n) => sum + n.theoryIndex, 0) / total;
   const anomaly = world.nodes.reduce((sum, n) => sum + n.anomalyMemory, 0) / total / 4;
+  const confusionLoad = world.nodes.reduce((sum, n) => sum + (n.confusionMemory || 0), 0) / total / 6;
+  const translationRate = world.nodes.reduce((sum, n) => sum + (n.translation || 0), 0) / total / 6;
+  const learningVelocity = world.nodes.reduce((sum, n) => sum + Math.abs(n.theoryIndex - n.prevTheoryIndex), 0) / total / PARADIGM_JUMP;
+  const socialFrontier = world.socialFrontierRank ?? percentile(world.nodes.map((n) => n.theoryIndex), 0.95);
+  const exposureFrontier = world.exposureFrontierRank ?? Math.min(world.frontier ?? world.hiddenIndex, socialFrontier + PARADIGM_JUMP * 2);
+  const frontierGap = clamp((world.hiddenIndex - socialFrontier) / (PHASES * 2), 0, 1);
+  const highestOrder = orderOf(world.nodes.reduce((max, n) => Math.max(max, n.theoryIndex), 0));
   return {
     predictionAccuracy: clamp(predictionAccuracy, 0, 1),
     active,
@@ -971,6 +1012,13 @@ function getMetrics(world) {
     meanDepth: indexDepth(meanIndex),
     frontierDepth: indexDepth(world.hiddenIndex),
     anomaly: clamp(anomaly, 0, 1),
+    confusionLoad: clamp(confusionLoad, 0, 1),
+    translationRate: clamp(translationRate, 0, 1),
+    learningVelocity: clamp(learningVelocity, 0, 1),
+    frontierGap,
+    highestOrder,
+    socialFrontier,
+    exposureFrontier,
   };
 }
 
@@ -1347,11 +1395,11 @@ function App() {
                 <div className="node-grid">
                   <span>{copy.node.coord}</span><strong>{selectedNode.x + 1}, {selectedNode.y + 1}</strong>
                   <span>{copy.node.type}</span><strong>{copy.types[selectedNode.type]}</strong>
-                  <span>{copy.node.belief}</span><strong>{indexToColor(selectedNode.theoryIndex)}</strong>
+                  <span>{copy.node.belief}</span><strong>S^{orderOf(selectedNode.theoryIndex)} · φ{phaseOf(selectedNode.theoryIndex)}</strong>
                   <span>{copy.node.message}</span><strong>{selectedNode.message}</strong>
                   <span>{copy.node.action}</span><strong>{Math.round(selectedNode.confidence * 100)}%</strong>
                   <span>{copy.node.reputation}</span><strong>{selectedNode.reputation}</strong>
-                  <span>{copy.node.energy}</span><strong>{selectedNode.energy} / A:{selectedNode.anomalyMemory.toFixed(1)}</strong>
+                  <span>{copy.node.energy}</span><strong>{selectedNode.energy} / A:{selectedNode.anomalyMemory.toFixed(1)} / T:{(selectedNode.translation || 0).toFixed(1)}</strong>
                 </div>
               ) : (
                 <p className="hint">{copy.node.hint}</p>
@@ -1398,11 +1446,11 @@ function App() {
             <div className="truth-strip">
               <div>
                 <Target size={18} />
-                <span>{copy.strip.truth} {indexToColor(world.hiddenIndex)} · L{world.hiddenIndex}</span>
+                <span>{copy.strip.truth} S^{orderOf(world.hiddenIndex)} · φ{phaseOf(world.hiddenIndex)}</span>
               </div>
               <div>
                 <Activity size={18} />
-                <span>{copy.strip.tick} {world.tick} · D{world.domainRadius.toFixed(2)} P{world.precision.toFixed(2)}</span>
+                <span>{copy.strip.tick} {world.tick} · H:{orderOf(world.hiddenIndex)} / S:{orderOf(metrics.socialFrontier)} / E:{orderOf(metrics.exposureFrontier)}</span>
               </div>
               <div>
                 <Zap size={18} />
@@ -1426,9 +1474,11 @@ function App() {
             <h2>{copy.status.title}</h2>
           </div>
           <Meter label="Prediction accuracy" value={metrics.predictionAccuracy} />
-          <Meter label="Explanatory scope" value={metrics.scope} tone="yellow" />
-          <Meter label="Paradigm depth" value={metrics.depth} tone="yellow" />
+          <Meter label="Learning velocity" value={metrics.learningVelocity} tone="yellow" />
           <Meter label="Anomaly pressure" value={metrics.anomaly} tone="red" />
+          <Meter label="Confusion load" value={metrics.confusionLoad} tone="red" />
+          <Meter label="Translation rate" value={metrics.translationRate} tone="yellow" />
+          <Meter label="Frontier gap" value={metrics.frontierGap} tone="red" />
           <div className="ascent-bar">
             <div className="ascent-gradient" />
             <span className="ascent-marker society" style={{ left: `${metrics.meanDepth * 100}%` }} />
@@ -1436,7 +1486,7 @@ function App() {
           </div>
           <div className="split-stat">
             <span>Active speech: {Math.round(metrics.active * 100)}%</span>
-            <span>Polarization: {Math.round(metrics.polarization * 100)}%</span>
+            <span>Highest active order: S^{metrics.highestOrder}</span>
             <span>Paradigm shifts: {world.paradigmShiftCount}</span>
           </div>
           <p className="event-line">{eventText}</p>
