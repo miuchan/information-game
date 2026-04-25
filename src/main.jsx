@@ -1047,10 +1047,7 @@ function App() {
     function handleResize() {
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
-        const next = viewportGrid();
-        setDimensions(next);
-        setWorld(createWorld(Date.now(), scenario, next));
-        setSelected(null);
+        setDimensions(viewportGrid());
       }, 180);
     }
     window.addEventListener('resize', handleResize);
@@ -1058,7 +1055,7 @@ function App() {
       clearTimeout(resizeTimer);
       window.removeEventListener('resize', handleResize);
     };
-  }, [scenario]);
+  }, []);
 
   useEffect(() => {
     if (!running) return undefined;
