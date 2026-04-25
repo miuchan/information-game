@@ -548,6 +548,19 @@ function theoryError(theoryIndex, contextStress, precision, hiddenIndex) {
   return underfit + precisionPenalty;
 }
 
+function productiveAnomaly(gap) {
+  if (gap <= 0) return 0;
+  const idealGap = 64;
+  const width = 96;
+  return Math.exp(-((gap - idealGap) ** 2) / (2 * width ** 2));
+}
+
+function confusionPressure(gap) {
+  if (gap <= 0) return 0;
+  const productive = productiveAnomaly(gap);
+  return Math.min(1, gap / 512) * (1 - productive);
+}
+
 function viewportGrid() {
   if (typeof window === 'undefined') return { width: 80, height: 45, cellSize: CELL_SIZE };
   return {
@@ -659,6 +672,10 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
         attention: 0,
         checked: false,
         lagResistance: rng(),
+        openness: clamp(0.25 + rng() * 0.65, 0, 1),
+        confusionMemory: 0,
+        productiveSignal: 0,
+        exposureDepth: 0,
         anomalyMemory: rng() * 0.4,
         accuracyStreak: 0,
       });
@@ -768,6 +785,11 @@ function stepWorld(world, options, scenarioId) {
   const revealTick = (world.tick + 1) % EVOLUTION_PACE.revealCadence === 0;
   const hiddenIndex = world.hiddenIndex;
   const frontier = world.frontier ?? hiddenIndex;
+  const currentMaxTheoryIndex = oldNodes.reduce((max, node) => Math.max(max, node.theoryIndex), 0);
+  const frontierLagWindow = 220;
+  const frontierNeighborWindow = 180;
+  const breakthroughThreshold = 1.15;
+  const confusionLimit = 1.6;
 
   const nodes = messaged.map((node) => {
     const contextStress = stressAt(node.x, node.y, world);
@@ -780,8 +802,11 @@ function stepWorld(world, options, scenarioId) {
       ? normalizeIndex(frontier - Math.floor(rng() * frontierBand))
       : Math.floor(rng() * Math.max(1, frontier - frontierBand));
     const challengeGap = challengeDifficulty - node.theoryIndex;
-    const modelError = theoryError(node.theoryIndex, contextStress, world.precision, hiddenIndex) + Math.max(0, challengeGap) / MAX_THEORY_INDEX;
-    if (rng() < rate && rng() < settings.signalAccuracy) privatePush = sign(challengeGap);
+    const rawGap = Math.max(0, challengeGap);
+    const productive = productiveAnomaly(rawGap);
+    const confusion = confusionPressure(rawGap);
+    const modelError = theoryError(node.theoryIndex, contextStress, world.precision, hiddenIndex) + productive * 0.55;
+    if (rng() < rate && rng() < settings.signalAccuracy) privatePush = productive > 0.18 ? sign(challengeGap) : 0;
 
     const pressure = pressureFor(node, messaged, neighbors, options);
     let threshold = 1.2;
@@ -807,13 +832,30 @@ function stepWorld(world, options, scenarioId) {
     const anomalyDrive = node.anomalyMemory > 2.4 && neighborhoodAvg > node.theoryIndex ? 1 : 0;
     const dynamicResistance = (node.lagResistance || 0) * Math.exp(-node.anomalyMemory * 0.35);
     const lagDrag = dynamicResistance > 0.82 && rng() < 0.35 ? -1 : 0;
-    const netDirection = privatePush + socialPush + attentionPush + anomalyDrive + lagDrag;
+    const confusionDrag = (node.confusionMemory || 0) > confusionLimit ? -1 : 0;
+    const netDirection = privatePush + socialPush + attentionPush + anomalyDrive + lagDrag + confusionDrag;
     const gapToFrontier = Math.max(0, hiddenIndex - node.theoryIndex);
     const adaptiveStep = clamp(1 + Math.floor(gapToFrontier / 256), 1, 12);
     const stepSize = netDirection === 0 ? 0 : adaptiveStep * COLOR_STEP;
-    const nextTheoryIndex = normalizeIndex(node.theoryIndex + sign(netDirection) * stepSize);
+    let nextTheoryIndex = normalizeIndex(node.theoryIndex + sign(netDirection) * stepSize);
     const confidence = clamp(node.confidence * 0.88 + (netDirection !== 0 ? 0.1 : -0.03) + (Math.abs(hiddenIndex - nextTheoryIndex) < Math.abs(hiddenIndex - node.theoryIndex) ? 0.06 : -0.02), 0.05, 0.99);
-    let anomalyMemory = clamp((node.anomalyMemory || 0) * 0.9 + modelError * 0.6 + (challengeGap > 0 ? 0.25 : -0.05), 0, 6);
+    let anomalyMemory = clamp((node.anomalyMemory || 0) * 0.92 + productive * (0.8 + Math.min(0.4, (node.exposureDepth || 0) * 0.1)), 0, 6);
+    let confusionMemory = clamp((node.confusionMemory || 0) * 0.94 + confusion, 0, 6);
+    const exposureDepth = clamp((node.exposureDepth || 0) * 0.9 + challengeDifficulty / MAX_THEORY_INDEX, 0, 4);
+
+    const lagToMax = currentMaxTheoryIndex - node.theoryIndex;
+    const closeToFrontier = lagToMax >= 0 && lagToMax <= frontierLagWindow;
+    const frontierContact = neighbors[node.id].some((ni) => messaged[ni].theoryIndex >= currentMaxTheoryIndex - frontierNeighborWindow);
+    const canBreakthrough = closeToFrontier
+      && anomalyMemory > breakthroughThreshold
+      && (node.openness || 0) > 0.4
+      && confusionMemory < confusionLimit
+      && frontierContact;
+    if (canBreakthrough) {
+      nextTheoryIndex = Math.min(MAX_THEORY_INDEX, Math.max(nextTheoryIndex, currentMaxTheoryIndex + Math.floor(PARADIGM_JUMP / 2)));
+      anomalyMemory *= 0.25;
+      confusionMemory *= 0.5;
+    }
     if (revealTick && (node.checked || rng() < settings.publicEvidenceRate * EVOLUTION_PACE.revealAudience)) anomalyMemory = clamp(anomalyMemory + 0.45, 0, 6);
 
     const nextAction = nextTheoryIndex;
@@ -829,6 +871,9 @@ function stepWorld(world, options, scenarioId) {
       energy: clamp(node.energy - spent + passiveRecovery + (attention >= 3 ? 1 : 0), 0, 9),
       attention,
       anomalyMemory,
+      confusionMemory,
+      productiveSignal: productive,
+      exposureDepth,
     };
   });
 
@@ -1035,8 +1080,12 @@ function CellCanvas({ world, selected, onSelect }) {
         ctx.fill();
         ctx.globalAlpha = 1;
       }
-      if (node.anomalyMemory > 2.2) {
-        ctx.strokeStyle = 'rgba(0,0,0,.48)';
+      if (node.productiveSignal > 0.55) {
+        ctx.strokeStyle = indexToColor(Math.min(MAX_THEORY_INDEX, visibleIndex + Math.floor(MAX_THEORY_INDEX / VISUAL_BANDS)));
+        ctx.lineWidth = Math.max(1, cell * 0.09);
+        ctx.strokeRect(node.x * cell + 1.5, node.y * cell + 1.5, cell - 3, cell - 3);
+      } else if (node.confusionMemory > 1.4) {
+        ctx.strokeStyle = 'rgba(70,70,70,.55)';
         ctx.lineWidth = Math.max(1, cell * 0.08);
         ctx.strokeRect(node.x * cell + 2, node.y * cell + 2, cell - 4, cell - 4);
       }
