@@ -434,6 +434,35 @@ h3 {
   margin-top: 12px;
 }
 
+.order-skyline {
+  border-top: 1px solid rgba(255,255,255,.08);
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+  max-height: 140px;
+  overflow: auto;
+  padding-top: 8px;
+}
+
+.skyline-row {
+  align-items: center;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 42px 1fr;
+}
+
+.skyline-row span {
+  color: #9db0a7;
+  font-size: 11px;
+}
+
+.skyline-row i {
+  background: linear-gradient(90deg, #3a7ed8, #d8a044);
+  border-radius: 999px;
+  display: block;
+  height: 6px;
+}
+
 .event-line,
 .hint {
   color: #c8d2cc;

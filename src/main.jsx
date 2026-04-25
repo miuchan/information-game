@@ -29,6 +29,8 @@ import { FaGithub } from 'react-icons/fa';
 import './styles.css';
 
 const CELL_SIZE = 18;
+const WORLD_WIDTH = 512;
+const WORLD_HEIGHT = 512;
 const SCENARIOS = ['scarce', 'polarized', 'anonymous', 'viral', 'bridge', 'market'];
 const LANGUAGES = [
   { code: 'en', label: 'English' },
@@ -586,11 +588,11 @@ function percentile(values, p) {
 }
 
 function viewportGrid() {
-  if (typeof window === 'undefined') return { width: 80, height: 45, cellSize: CELL_SIZE };
+  if (typeof window === 'undefined') return { width: WORLD_WIDTH, height: WORLD_HEIGHT, cellSize: 10 };
   return {
-    width: Math.max(24, Math.ceil(window.innerWidth / CELL_SIZE)),
-    height: Math.max(18, Math.ceil(window.innerHeight / CELL_SIZE)),
-    cellSize: CELL_SIZE,
+    width: WORLD_WIDTH,
+    height: WORLD_HEIGHT,
+    cellSize: 10,
   };
 }
 
@@ -1002,6 +1004,11 @@ function getMetrics(world) {
   const exposureFrontier = world.exposureFrontierRank ?? Math.min(world.frontier ?? world.hiddenIndex, socialFrontier + PARADIGM_JUMP * 2);
   const frontierGap = clamp((world.hiddenIndex - socialFrontier) / (PHASES * 2), 0, 1);
   const highestOrder = orderOf(world.nodes.reduce((max, n) => Math.max(max, n.theoryIndex), 0));
+  const orderSkylineCounts = new Array(ORDERS).fill(0);
+  world.nodes.forEach((node) => {
+    orderSkylineCounts[orderOf(node.theoryIndex)] += 1;
+  });
+  const orderSkyline = orderSkylineCounts.map((count) => count / total);
   return {
     predictionAccuracy: clamp(predictionAccuracy, 0, 1),
     active,
@@ -1019,6 +1026,7 @@ function getMetrics(world) {
     highestOrder,
     socialFrontier,
     exposureFrontier,
+    orderSkyline,
   };
 }
 
@@ -1097,8 +1105,11 @@ const INTERVENTIONS = {
   agitator: { icon: Radio, cost: 1 },
 };
 
-function CellCanvas({ world, selected, onSelect }) {
+function CellCanvas({
+  world, selected, onSelect, camera, onCameraChange,
+}) {
   const canvasRef = useRef(null);
+  const dragRef = useRef(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1111,66 +1122,139 @@ function CellCanvas({ world, selected, onSelect }) {
     canvas.style.height = `${heightPx}px`;
     const ctx = canvas.getContext('2d');
     ctx.scale(dpr, dpr);
-    const cell = world.cellSize;
+    const cell = Math.max(1.4, world.cellSize * camera.zoom);
     ctx.fillStyle = '#101316';
     ctx.fillRect(0, 0, widthPx, heightPx);
 
-    world.nodes.forEach((node) => {
-      const visibleIndex = visualIndex(node.theoryIndex);
-      const baseColor = indexToColor(visibleIndex);
-      const brightness = 0.52 + node.confidence * 0.58;
-      ctx.fillStyle = baseColor;
-      ctx.globalAlpha = brightness;
-      ctx.fillRect(node.x * cell + 0.5, node.y * cell + 0.5, cell - 1, cell - 1);
-      ctx.globalAlpha = 1;
-      if (visibleIndex > 0) {
-        ctx.fillStyle = indexToColor(Math.max(0, visibleIndex - Math.floor(MAX_THEORY_INDEX / VISUAL_BANDS)));
-        ctx.globalAlpha = 0.72;
-        ctx.beginPath();
-        ctx.arc(node.x * cell + cell * 0.5, node.y * cell + cell * 0.5, Math.max(1, cell * 0.14), 0, Math.PI * 2);
-        ctx.fill();
+    const minX = clamp(Math.floor(camera.x), 0, world.width - 1);
+    const minY = clamp(Math.floor(camera.y), 0, world.height - 1);
+    const maxX = clamp(Math.ceil(camera.x + widthPx / cell), 0, world.width - 1);
+    const maxY = clamp(Math.ceil(camera.y + heightPx / cell), 0, world.height - 1);
+
+    for (let y = minY; y <= maxY; y += 1) {
+      for (let x = minX; x <= maxX; x += 1) {
+        const node = world.nodes[idx(x, y, world.width)];
+        if (!node) continue;
+        const sx = (node.x - camera.x) * cell;
+        const sy = (node.y - camera.y) * cell;
+        if (sx + cell < 0 || sy + cell < 0 || sx > widthPx || sy > heightPx) continue;
+        const visibleIndex = visualIndex(node.theoryIndex);
+        const baseColor = indexToColor(visibleIndex);
+        const brightness = 0.52 + node.confidence * 0.58;
+        ctx.fillStyle = baseColor;
+        ctx.globalAlpha = brightness;
+        ctx.fillRect(sx + 0.5, sy + 0.5, cell - 1, cell - 1);
         ctx.globalAlpha = 1;
+        if (visibleIndex > 0) {
+          ctx.fillStyle = indexToColor(Math.max(0, visibleIndex - Math.floor(MAX_THEORY_INDEX / VISUAL_BANDS)));
+          ctx.globalAlpha = 0.72;
+          ctx.beginPath();
+          ctx.arc(sx + cell * 0.5, sy + cell * 0.5, Math.max(1, cell * 0.14), 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+        if (node.message !== 0) {
+          ctx.fillStyle = node.message > 0 ? '#f3fbff' : '#ffe7e1';
+          ctx.globalAlpha = 0.75;
+          ctx.beginPath();
+          ctx.arc(sx + cell * 0.5, sy + cell * 0.5, Math.max(1.2, cell * 0.16), 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+        if (node.productiveSignal > 0.55) {
+          ctx.strokeStyle = indexToColor(Math.min(MAX_THEORY_INDEX, visibleIndex + Math.floor(MAX_THEORY_INDEX / VISUAL_BANDS)));
+          ctx.lineWidth = Math.max(1, cell * 0.09);
+          ctx.strokeRect(sx + 1.5, sy + 1.5, cell - 3, cell - 3);
+        } else if (node.confusionMemory > 1.4) {
+          ctx.strokeStyle = 'rgba(70,70,70,.55)';
+          ctx.lineWidth = Math.max(1, cell * 0.08);
+          ctx.strokeRect(sx + 2, sy + 2, cell - 4, cell - 4);
+        }
+        if (node.reputation >= 6 || node.type === 'checker' || node.type === 'bot') {
+          ctx.strokeStyle = node.type === 'checker' ? '#f1c84c' : node.type === 'bot' ? '#7b5cf0' : 'rgba(255,255,255,.7)';
+          ctx.lineWidth = Math.max(1, cell * 0.12);
+          ctx.strokeRect(sx + 1, sy + 1, cell - 2, cell - 2);
+        }
       }
-      if (node.message !== 0) {
-        ctx.fillStyle = node.message > 0 ? '#f3fbff' : '#ffe7e1';
-        ctx.globalAlpha = 0.75;
-        ctx.beginPath();
-        ctx.arc(node.x * cell + cell * 0.5, node.y * cell + cell * 0.5, Math.max(1.2, cell * 0.16), 0, Math.PI * 2);
-        ctx.fill();
-        ctx.globalAlpha = 1;
-      }
-      if (node.productiveSignal > 0.55) {
-        ctx.strokeStyle = indexToColor(Math.min(MAX_THEORY_INDEX, visibleIndex + Math.floor(MAX_THEORY_INDEX / VISUAL_BANDS)));
-        ctx.lineWidth = Math.max(1, cell * 0.09);
-        ctx.strokeRect(node.x * cell + 1.5, node.y * cell + 1.5, cell - 3, cell - 3);
-      } else if (node.confusionMemory > 1.4) {
-        ctx.strokeStyle = 'rgba(70,70,70,.55)';
-        ctx.lineWidth = Math.max(1, cell * 0.08);
-        ctx.strokeRect(node.x * cell + 2, node.y * cell + 2, cell - 4, cell - 4);
-      }
-      if (node.reputation >= 6 || node.type === 'checker' || node.type === 'bot') {
-        ctx.strokeStyle = node.type === 'checker' ? '#f1c84c' : node.type === 'bot' ? '#7b5cf0' : 'rgba(255,255,255,.7)';
-        ctx.lineWidth = Math.max(1, cell * 0.12);
-        ctx.strokeRect(node.x * cell + 1, node.y * cell + 1, cell - 2, cell - 2);
-      }
-    });
+    }
 
     if (selected !== null) {
       const node = world.nodes[selected];
+      const sx = (node.x - camera.x) * cell;
+      const sy = (node.y - camera.y) * cell;
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 3;
-      ctx.strokeRect(node.x * cell + 1.5, node.y * cell + 1.5, cell - 3, cell - 3);
+      ctx.strokeRect(sx + 1.5, sy + 1.5, cell - 3, cell - 3);
     }
-  }, [world, selected]);
+  }, [world, selected, camera]);
 
   function handleClick(event) {
     const rect = event.currentTarget.getBoundingClientRect();
-    const x = Math.floor(((event.clientX - rect.left) / rect.width) * world.width);
-    const y = Math.floor(((event.clientY - rect.top) / rect.height) * world.height);
+    const cell = Math.max(1.4, world.cellSize * camera.zoom);
+    const x = Math.floor(camera.x + (event.clientX - rect.left) / cell);
+    const y = Math.floor(camera.y + (event.clientY - rect.top) / cell);
     onSelect(idx(clamp(x, 0, world.width - 1), clamp(y, 0, world.height - 1), world.width));
   }
 
-  return <canvas className="world-canvas" ref={canvasRef} onClick={handleClick} aria-label="信息传播元胞地图" />;
+  function handlePointerDown(event) {
+    dragRef.current = { x: event.clientX, y: event.clientY };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function handlePointerMove(event) {
+    if (!dragRef.current) return;
+    const prev = dragRef.current;
+    const dx = event.clientX - prev.x;
+    const dy = event.clientY - prev.y;
+    dragRef.current = { x: event.clientX, y: event.clientY };
+    const next = {
+      ...camera,
+      x: clamp(camera.x - dx / Math.max(0.1, camera.zoom * world.cellSize), 0, world.width - 1),
+      y: clamp(camera.y - dy / Math.max(0.1, camera.zoom * world.cellSize), 0, world.height - 1),
+    };
+    onCameraChange(next);
+  }
+
+  function handlePointerUp() {
+    dragRef.current = null;
+  }
+
+  function handleWheel(event) {
+    event.preventDefault();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const sx = event.clientX - rect.left;
+    const sy = event.clientY - rect.top;
+    const before = {
+      x: camera.x + sx / Math.max(1.4, world.cellSize * camera.zoom),
+      y: camera.y + sy / Math.max(1.4, world.cellSize * camera.zoom),
+    };
+    const factor = event.deltaY < 0 ? 1.12 : 0.89;
+    const zoom = clamp(camera.zoom * factor, 0.3, 8);
+    const cell = Math.max(1.4, world.cellSize * zoom);
+    const after = {
+      x: before.x - sx / cell,
+      y: before.y - sy / cell,
+    };
+    onCameraChange({
+      zoom,
+      x: clamp(after.x, 0, world.width - 1),
+      y: clamp(after.y, 0, world.height - 1),
+    });
+  }
+
+  return (
+    <canvas
+      className="world-canvas"
+      ref={canvasRef}
+      onClick={handleClick}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      onWheel={handleWheel}
+      aria-label="信息传播元胞地图"
+    />
+  );
 }
 
 function Meter({ label, value, tone = 'green' }) {
@@ -1187,9 +1271,11 @@ function Meter({ label, value, tone = 'green' }) {
   );
 }
 
-function ToggleButton({ active, icon: Icon, children, onClick }) {
+function ToggleButton({
+  active, icon: Icon, children, onClick, title,
+}) {
   return (
-    <button className={`toggle ${active ? 'active' : ''}`} onClick={onClick} type="button">
+    <button className={`toggle ${active ? 'active' : ''}`} onClick={onClick} type="button" title={title || children}>
       <Icon size={17} />
       <span>{children}</span>
     </button>
@@ -1292,6 +1378,7 @@ function App() {
   const [running, setRunning] = useState(false);
   const [speed, setSpeed] = useState(290);
   const [selected, setSelected] = useState(null);
+  const [camera, setCamera] = useState({ x: 0, y: 0, zoom: 1 });
   const [budget, setBudget] = useState(9);
   const [options, setOptions] = useState({
     showReputation: true,
@@ -1306,6 +1393,15 @@ function App() {
   const copy = COPY[locale];
   const eventText = getEventText(world.event, copy);
   const controlsToggleTitle = hideControls ? 'Show controls' : 'Hide controls';
+  const orderBands = useMemo(() => {
+    const groupSize = 4;
+    const bands = [];
+    for (let i = 0; i < ORDERS; i += groupSize) {
+      const value = metrics.orderSkyline.slice(i, i + groupSize).reduce((sum, current) => sum + current, 0);
+      bands.push({ label: `${i}-${i + groupSize - 1}`, value });
+    }
+    return bands;
+  }, [metrics.orderSkyline]);
 
   useEffect(() => {
     if (freezeWorldResize) return undefined;
@@ -1343,6 +1439,7 @@ function App() {
     setWorld(createWorld(Date.now(), nextScenario, dimensions));
     setRunning(false);
     setSelected(null);
+    setCamera({ x: 0, y: 0, zoom: 1 });
     setBudget(9);
   }
 
@@ -1357,7 +1454,7 @@ function App() {
 
   return (
     <main className="app-shell">
-      <CellCanvas world={world} selected={selected} onSelect={setSelected} />
+      <CellCanvas world={world} selected={selected} onSelect={setSelected} camera={camera} onCameraChange={setCamera} />
       <button
         className="icon-button ui-toggle-button"
         onClick={() => setHideControls((value) => !value)}
@@ -1489,6 +1586,14 @@ function App() {
             <span>Highest active order: S^{metrics.highestOrder}</span>
             <span>Paradigm shifts: {world.paradigmShiftCount}</span>
           </div>
+          <div className="order-skyline">
+            {orderBands.map((band) => (
+              <div key={band.label} className="skyline-row" title={`Order band ${band.label}`}>
+                <span>{band.label}</span>
+                <i style={{ width: `${Math.max(2, band.value * 100)}%` }} />
+              </div>
+            ))}
+          </div>
           <p className="event-line">{eventText}</p>
         </section>
 
@@ -1512,19 +1617,19 @@ function App() {
             <h2>{copy.sections.mechanisms}</h2>
           </div>
           <div className="toggle-grid">
-            <ToggleButton active={options.showReputation} icon={options.showReputation ? Eye : EyeOff} onClick={() => setOptions((o) => ({ ...o, showReputation: !o.showReputation }))}>
+            <ToggleButton active={options.showReputation} icon={options.showReputation ? Eye : EyeOff} title={copy.mechanisms.showReputation} onClick={() => setOptions((o) => ({ ...o, showReputation: !o.showReputation }))}>
               {copy.mechanisms.showReputation}
             </ToggleButton>
-            <ToggleButton active={options.hotRanking} icon={Zap} onClick={() => setOptions((o) => ({ ...o, hotRanking: !o.hotRanking }))}>
+            <ToggleButton active={options.hotRanking} icon={Zap} title={copy.mechanisms.hotRanking} onClick={() => setOptions((o) => ({ ...o, hotRanking: !o.hotRanking }))}>
               {copy.mechanisms.hotRanking}
             </ToggleButton>
-            <ToggleButton active={options.crossCommunity} icon={Network} onClick={() => setOptions((o) => ({ ...o, crossCommunity: !o.crossCommunity }))}>
+            <ToggleButton active={options.crossCommunity} icon={Network} title={copy.mechanisms.crossCommunity} onClick={() => setOptions((o) => ({ ...o, crossCommunity: !o.crossCommunity }))}>
               {copy.mechanisms.crossCommunity}
             </ToggleButton>
-            <ToggleButton active={options.anonymous} icon={EyeOff} onClick={() => setOptions((o) => ({ ...o, anonymous: !o.anonymous }))}>
+            <ToggleButton active={options.anonymous} icon={EyeOff} title={copy.mechanisms.anonymous} onClick={() => setOptions((o) => ({ ...o, anonymous: !o.anonymous }))}>
               {copy.mechanisms.anonymous}
             </ToggleButton>
-            <ToggleButton active={options.factCheck} icon={CheckCircle2} onClick={() => setOptions((o) => ({ ...o, factCheck: !o.factCheck }))}>
+            <ToggleButton active={options.factCheck} icon={CheckCircle2} title={copy.mechanisms.factCheck} onClick={() => setOptions((o) => ({ ...o, factCheck: !o.factCheck }))}>
               {copy.mechanisms.factCheck}
             </ToggleButton>
           </div>
@@ -1540,14 +1645,14 @@ function App() {
             {Object.entries(INTERVENTIONS).map(([key, item]) => {
               const Icon = item.icon;
               return (
-                <button key={key} disabled={budget < item.cost} onClick={() => intervene(key)} type="button">
+                <button key={key} disabled={budget < item.cost} onClick={() => intervene(key)} type="button" title={copy.interventions[key]}>
                   <Icon size={17} />
                   <span>{copy.interventions[key]}</span>
                   <small>{item.cost}</small>
                 </button>
               );
             })}
-            <button disabled={budget < 2} onClick={() => { setBudget((b) => b - 2); setWorld((current) => addBridge(current)); }} type="button">
+            <button disabled={budget < 2} onClick={() => { setBudget((b) => b - 2); setWorld((current) => addBridge(current)); }} type="button" title={copy.interventions.bridgeEdge}>
               <Network size={17} />
               <span>{copy.interventions.bridgeEdge}</span>
               <small>2</small>
