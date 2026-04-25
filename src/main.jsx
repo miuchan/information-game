@@ -619,7 +619,7 @@ function pressureFor(node, oldNodes, neighbors, options) {
     const evidenceBacked = Math.abs(other.evidenceMemory || 0) >= 3 && sign(other.evidenceMemory || 0) === other.message;
     if (evidenceBacked) weight += 0.9;
     pressure += weight * other.message;
-    heard += Math.abs(weight);
+    heard += 1;
   });
   return heard === 0 ? 0 : pressure / Math.max(1, Math.pow(heard, 0.75));
 }
@@ -787,6 +787,7 @@ function applyIntervention(world, kind, targetId) {
     node.energy = 9;
     node.belief = node.belief >= 0 ? 2 : -2;
     node.message = sign(node.belief);
+    node.action = actionFromBelief(node.belief);
   }
   return {
     ...world,
