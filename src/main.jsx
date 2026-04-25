@@ -438,20 +438,88 @@ function makeRng(seed) {
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const sign = (value) => (value > 0 ? 1 : value < 0 ? -1 : 0);
-const actionFromBelief = (belief) => (belief >= 1 ? 1 : belief <= -1 ? 0 : null);
 const idx = (x, y, width) => y * width + x;
 const coord = (i, width) => [i % width, Math.floor(i / width)];
 
 const EVOLUTION_PACE = {
-  privateSignal: 0.58,
-  socialThreshold: 1.28,
-  socialAdoption: 0.62,
-  attentionAdoption: 0.5,
-  revealCadence: 6,
-  revealAudience: 0.6,
+  privateSignal: 0.46,
+  socialThreshold: 1.1,
+  socialAdoption: 0.65,
+  attentionAdoption: 0.56,
+  revealCadence: 5,
+  revealAudience: 0.58,
   evidenceLock: 4,
-  weakPushAdoption: 0.55,
+  weakPushAdoption: 0.6,
 };
+
+const MAX_THEORY_INDEX = 8191;
+const COLOR_STEP = 1;
+const colorCache = new Map();
+
+function normalizeIndex(value) {
+  return clamp(Math.round(value), 0, MAX_THEORY_INDEX);
+}
+
+function indexToColor(value) {
+  const index = normalizeIndex(value);
+  if (colorCache.has(index)) return colorCache.get(index);
+  const s = index / MAX_THEORY_INDEX;
+  const lightness = 0.18 + 0.78 * Math.pow(s, 0.92);
+  const chroma = 0.03 + 0.12 * (Math.sin(Math.PI * s) ** 2);
+  const hueDeg = (260 + 360 * 7 * s) % 360;
+  const hueRad = (hueDeg * Math.PI) / 180;
+  const a = chroma * Math.cos(hueRad);
+  const b = chroma * Math.sin(hueRad);
+
+  const l = lightness + 0.3963377774 * a + 0.2158037573 * b;
+  const m = lightness - 0.1055613458 * a - 0.0638541728 * b;
+  const sLinear = lightness - 0.0894841775 * a - 1.291485548 * b;
+
+  const l3 = l ** 3;
+  const m3 = m ** 3;
+  const s3 = sLinear ** 3;
+
+  const linearR = +4.0767416621 * l3 - 3.3077115913 * m3 + 0.2309699292 * s3;
+  const linearG = -1.2684380046 * l3 + 2.6097574011 * m3 - 0.3413193965 * s3;
+  const linearB = -0.0041960863 * l3 - 0.7034186147 * m3 + 1.707614701 * s3;
+
+  const toSrgb = (linear) => {
+    const clamped = clamp(linear, 0, 1);
+    if (clamped <= 0.0031308) return clamped * 12.92;
+    return 1.055 * (clamped ** (1 / 2.4)) - 0.055;
+  };
+  const r = Math.round(toSrgb(linearR) * 255);
+  const g = Math.round(toSrgb(linearG) * 255);
+  const blue = Math.round(toSrgb(linearB) * 255);
+  const color = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${blue.toString(16).padStart(2, '0')}`;
+  colorCache.set(index, color);
+  return color;
+}
+
+function indexDepth(value) {
+  return normalizeIndex(value) / MAX_THEORY_INDEX;
+}
+
+function stressAt(x, y, world) {
+  const cx = (world.width - 1) / 2;
+  const cy = (world.height - 1) / 2;
+  const dx = (x - cx) / Math.max(1, cx);
+  const dy = (y - cy) / Math.max(1, cy);
+  const radial = Math.sqrt(dx * dx + dy * dy);
+  const wave = 0.5 + 0.5 * Math.sin(world.tick * 0.05 + x * 0.09 + y * 0.07);
+  return clamp(radial * 0.75 + wave * world.frontierPressure * 0.45 + world.domainRadius * 0.3, 0, 1);
+}
+
+function theoryError(theoryIndex, contextStress, precision, hiddenIndex) {
+  const depth = indexDepth(theoryIndex);
+  const hiddenDepth = indexDepth(hiddenIndex);
+  const mismatch = Math.max(0, hiddenDepth - depth);
+  const scope = 0.22 + 0.78 * Math.pow(depth, 0.8);
+  const frontierPenalty = Math.max(0, contextStress - scope);
+  const precisionPenalty = precision * mismatch * 0.7;
+  const underfit = mismatch * 1.12 + frontierPenalty * (1.05 + mismatch * 0.35);
+  return underfit + precisionPenalty;
+}
 
 function viewportGrid() {
   if (typeof window === 'undefined') return { width: 80, height: 45, cellSize: CELL_SIZE };
@@ -510,41 +578,52 @@ function buildNeighbors(rng, width, height, crossCommunity = true) {
 
 function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = viewportGrid()) {
   const rng = makeRng(seed);
-  const truth = rng() > 0.5 ? 1 : 0;
   const settings = scenarioSettings(scenarioId);
   const nodes = [];
   const { width, height, cellSize } = dimensions;
   const scenarioBias = {
     scarce: 0,
-    polarized: 1,
+    polarized: 0,
     anonymous: 0,
     viral: 0,
-    bridge: -1,
+    bridge: 0,
     market: 0,
   }[scenarioId];
+  const hiddenIndex = normalizeIndex(
+    {
+      scarce: 620,
+      polarized: 940,
+      anonymous: 1120,
+      viral: 1280,
+      bridge: 1520,
+      market: 1680,
+    }[scenarioId] + Math.floor(rng() * 240),
+  );
 
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const community = communityOf(x, y, width, height);
-      const localBias = scenarioId === 'polarized' || scenarioId === 'bridge'
-        ? (community % 2 === 0 ? -1 : 1)
-        : scenarioBias;
+      const localNoise = (rng() - 0.5) * 0.32;
+      const localBias = scenarioId === 'polarized'
+        ? scenarioBias + localNoise + (rng() < 0.5 ? -0.3 : 0.3)
+        : scenarioBias + localNoise;
       const roll = rng();
       const type = roll < 0.22 ? 'truth' : roll < 0.58 ? 'social' : roll < 0.82 ? 'attention' : 'stubborn';
-      const privateSignal = rng() < settings.initialSignalRate
-        ? (rng() < settings.initialSignalAccuracy ? truth : 1 - truth)
-        : null;
-      const signalPush = privateSignal === null ? 0 : privateSignal === 1 ? 1 : -1;
-      const belief = clamp(localBias + signalPush + (rng() < 0.12 ? (rng() > 0.5 ? 1 : -1) : 0), -2, 2);
+      const startIndex = normalizeIndex(
+        hiddenIndex
+        - Math.floor((0.06 + Math.max(0, -localBias) * 0.11) * MAX_THEORY_INDEX)
+        + (rng() < settings.initialSignalRate ? Math.floor((rng() < settings.initialSignalAccuracy ? 1 : -1) * MAX_THEORY_INDEX * 0.01) : 0),
+      );
       nodes.push({
         id: idx(x, y, width),
         x,
         y,
         community,
-        belief,
-        prevBelief: belief,
-        message: belief > 0 ? 1 : belief < 0 ? -1 : 0,
-        action: actionFromBelief(belief),
+        theoryIndex: startIndex,
+        prevTheoryIndex: startIndex,
+        confidence: clamp(0.45 + rng() * 0.35, 0.2, 0.95),
+        message: 0,
+        action: startIndex,
         reputation: Math.floor(1 + rng() * 4),
         type,
         filter: Math.floor(rng() * 4),
@@ -552,26 +631,24 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
         lastFlip: 0,
         attention: 0,
         checked: false,
-        evidenceMemory: 0,
+        anomalyMemory: rng() * 0.4,
         accuracyStreak: 0,
       });
     }
   }
 
   if (scenarioId === 'bridge') {
-    const cx = Math.floor(width / 2);
-    const y0 = Math.max(0, Math.floor(height * 0.38));
-    const y1 = Math.min(height, Math.floor(height * 0.62));
-    for (let y = y0; y < y1; y += 1) {
-      [cx - 1, cx, cx + 1].forEach((x) => {
-        if (x < 0 || x >= width) return;
-        const node = nodes[idx(x, y, width)];
-        node.belief = truth === 1 ? -2 : 2;
-        node.message = truth === 1 ? -1 : 1;
-        node.action = actionFromBelief(node.belief);
-        node.type = 'attention';
-        node.reputation = 5;
-      });
+    const seededCount = Math.max(20, Math.round(nodes.length * 0.015));
+    for (let k = 0; k < seededCount; k += 1) {
+      const node = nodes[Math.floor(rng() * nodes.length)];
+      if (!node) continue;
+      node.theoryIndex = normalizeIndex(node.theoryIndex - 480);
+      node.prevTheoryIndex = node.theoryIndex;
+      node.confidence = clamp(node.confidence + 0.12, 0, 0.95);
+      node.message = -1;
+      node.action = node.theoryIndex;
+      node.type = 'attention';
+      node.reputation = Math.max(node.reputation, 5);
     }
   }
 
@@ -581,7 +658,12 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
     width,
     height,
     cellSize,
-    truth,
+    hiddenIndex,
+    frontier: hiddenIndex,
+    domainRadius: 0.28,
+    precision: 0.2,
+    frontierPressure: scenarioId === 'bridge' ? 0.22 : 0.12,
+    paradigmShiftCount: 0,
     tick: 0,
     nodes,
     neighbors: buildNeighbors(rng, width, height, true),
@@ -601,22 +683,16 @@ function scenarioSettings(id) {
 }
 
 function generateMessage(node, oldNodes, neighbors, options, rng) {
-  if (node.type === 'checker') return node.belief === 0 ? 0 : sign(node.belief);
-  if (node.type === 'bot') return node.message || 1;
-  const local = neighbors[node.id].reduce((sum, ni) => sum + oldNodes[ni].message, 0);
+  if (node.type === 'bot') return -1;
+  const localIndex = neighbors[node.id].reduce((sum, ni) => sum + oldNodes[ni].theoryIndex, 0) / Math.max(1, neighbors[node.id].length);
+  const delta = localIndex - node.theoryIndex;
   let msg = 0;
-  if (node.type === 'truth') {
-    msg = Math.abs(node.belief) >= 2 ? sign(node.belief) : 0;
-  } else if (node.type === 'social') {
-    msg = Math.abs(local) >= 2 ? sign(local) : sign(node.belief);
-  } else if (node.type === 'attention') {
-    msg = Math.abs(node.belief) >= 1 ? sign(node.belief) : (local === 0 ? 0 : sign(local));
-    if (options.hotRanking && rng() < 0.18) msg = local >= 0 ? 1 : -1;
-  } else if (node.type === 'stubborn') {
-    msg = Math.abs(node.belief) >= 1 && rng() > 0.35 ? sign(node.belief) : 0;
-  } else if (node.type === 'agitator') {
-    msg = node.belief >= 0 ? 1 : -1;
-  }
+  if (node.type === 'checker' || node.type === 'truth') msg = node.anomalyMemory > 1.3 ? 1 : 0;
+  else if (node.type === 'social') msg = Math.abs(delta) > MAX_THEORY_INDEX * 0.015 ? sign(delta) : 0;
+  else if (node.type === 'attention') msg = Math.abs(delta) > MAX_THEORY_INDEX * 0.01 ? sign(delta) : (rng() < 0.18 ? 1 : 0);
+  else if (node.type === 'stubborn') msg = node.anomalyMemory > 2.8 ? 1 : 0;
+  else if (node.type === 'agitator') msg = rng() < 0.75 ? -1 : 1;
+  if (options.hotRanking && node.type === 'attention' && rng() < 0.22) msg = rng() < 0.8 ? 1 : -1;
   if (node.energy <= 0 && node.type !== 'checker') return 0;
   return msg;
 }
@@ -634,7 +710,7 @@ function pressureFor(node, oldNodes, neighbors, options) {
     if (node.filter === 2 && Math.abs(other.message) > 0) weight += 0.25;
     if (node.filter === 3 && other.community !== node.community) weight *= 0.72;
     if (options.anonymous) weight = 1 + (options.hotRanking ? Math.min(1.4, other.attention * 0.15) : 0);
-    const evidenceBacked = Math.abs(other.evidenceMemory || 0) >= 3 && sign(other.evidenceMemory || 0) === other.message;
+    const evidenceBacked = (other.anomalyMemory || 0) >= 1.9 && other.message > 0;
     if (evidenceBacked) weight += 0.9;
     pressure += weight * other.message;
     heard += 1;
@@ -654,28 +730,27 @@ function stepWorld(world, options, scenarioId) {
 
   const messaged = oldNodes.map((node) => ({
     ...node,
-    prevBelief: node.belief,
+    prevTheoryIndex: node.theoryIndex,
     message: generateMessage(node, oldNodes, neighbors, options, rng),
   }));
 
   const revealTick = (world.tick + 1) % EVOLUTION_PACE.revealCadence === 0;
-  const truthPush = world.truth === 1 ? 1 : -1;
+  const hiddenIndex = world.hiddenIndex;
+  const frontier = world.frontier ?? hiddenIndex;
 
   const nodes = messaged.map((node) => {
+    const contextStress = stressAt(node.x, node.y, world);
     let privatePush = 0;
     const baseRate = node.type === 'checker' ? settings.signalRate * 8 : settings.signalRate;
     const rate = baseRate * EVOLUTION_PACE.privateSignal;
-    const accuracy = node.type === 'checker' ? 0.92 : settings.signalAccuracy;
-    if (rng() < rate) {
-      const signal = rng() < accuracy ? world.truth : 1 - world.truth;
-      privatePush = signal === 1 ? 1 : -1;
-    }
-
-    if (options.factCheck && node.checked) privatePush += truthPush;
-    if (options.factCheck && revealTick && (node.checked || rng() < 0.28 * EVOLUTION_PACE.revealAudience)) privatePush += truthPush;
-
-    let evidenceMemory = clamp((node.evidenceMemory || 0) + privatePush, -5, 5);
-    if (privatePush === 0 && evidenceMemory !== 0 && rng() < 0.08) evidenceMemory -= sign(evidenceMemory);
+    const frontierMix = clamp(0.1 + world.frontierPressure * 0.32, 0.08, 0.45);
+    const frontierBand = Math.max(8, Math.floor(MAX_THEORY_INDEX * 0.07));
+    const challengeDifficulty = rng() < frontierMix
+      ? normalizeIndex(frontier - Math.floor(rng() * frontierBand))
+      : Math.floor(rng() * Math.max(1, frontier - frontierBand));
+    const challengeGap = challengeDifficulty - node.theoryIndex;
+    const modelError = theoryError(node.theoryIndex, contextStress, world.precision, hiddenIndex) + Math.max(0, challengeGap) / MAX_THEORY_INDEX;
+    if (rng() < rate && rng() < settings.signalAccuracy) privatePush = sign(challengeGap);
 
     const pressure = pressureFor(node, messaged, neighbors, options);
     let threshold = 1.2;
@@ -692,38 +767,32 @@ function stepWorld(world, options, scenarioId) {
       const adoptionChance = Math.min(0.92, EVOLUTION_PACE.socialAdoption + Math.max(0, Math.abs(pressure) - threshold) * 0.08);
       if (rng() > adoptionChance) socialPush = 0;
     }
-    if (Math.abs(evidenceMemory) >= EVOLUTION_PACE.evidenceLock) {
-      socialPush = 0;
-      privatePush = sign(evidenceMemory);
-    }
-    if (node.type === 'stubborn' && socialPush !== sign(node.belief)) socialPush = 0;
+    if (node.type === 'stubborn' && socialPush < 0) socialPush = 0;
 
     let attentionPush = options.hotRanking && node.type === 'attention' && Math.abs(pressure) > 3.1 ? sign(pressure) : 0;
     if (attentionPush !== 0 && rng() > EVOLUTION_PACE.attentionAdoption) attentionPush = 0;
 
-    const rawPush = privatePush + socialPush + attentionPush;
-    const effectivePush = Math.abs(rawPush) >= 2
-      ? sign(rawPush)
-      : (Math.abs(rawPush) === 1 && rng() < EVOLUTION_PACE.weakPushAdoption ? sign(rawPush) : 0);
-    let nextBelief = clamp(node.belief + effectivePush, -2, 2);
-    if (Math.abs(nextBelief) === 2 && rng() < 0.005) nextBelief -= sign(nextBelief);
+    const neighborhoodAvg = neighbors[node.id].reduce((sum, ni) => sum + messaged[ni].theoryIndex, 0) / Math.max(1, neighbors[node.id].length);
+    const anomalyDrive = node.anomalyMemory > 2.4 && neighborhoodAvg > node.theoryIndex ? 1 : 0;
+    const netDirection = privatePush + socialPush + attentionPush + anomalyDrive;
+    const stepSize = netDirection === 0 ? 0 : COLOR_STEP;
+    const nextTheoryIndex = normalizeIndex(node.theoryIndex + sign(netDirection) * stepSize);
+    const confidence = clamp(node.confidence * 0.88 + (netDirection !== 0 ? 0.1 : -0.03) + (Math.abs(hiddenIndex - nextTheoryIndex) < Math.abs(hiddenIndex - node.theoryIndex) ? 0.06 : -0.02), 0.05, 0.99);
+    let anomalyMemory = clamp((node.anomalyMemory || 0) * 0.9 + modelError * 0.6 + (challengeGap > 0 ? 0.25 : -0.05), 0, 6);
+    if (revealTick && (node.checked || rng() < settings.publicEvidenceRate * EVOLUTION_PACE.revealAudience)) anomalyMemory = clamp(anomalyMemory + 0.45, 0, 6);
 
-    if (revealTick && rng() < settings.publicEvidenceRate) {
-      evidenceMemory = clamp(evidenceMemory + truthPush, -5, 5);
-      if (node.type === 'truth' || node.type === 'checker') nextBelief = clamp(nextBelief + truthPush, -2, 2);
-    }
-
-    const nextAction = actionFromBelief(nextBelief);
+    const nextAction = nextTheoryIndex;
     const spent = node.message === 0 ? 0 : node.type === 'attention' || node.type === 'agitator' ? 2 : 1;
     const attention = Math.max(0, Math.round(Math.abs(pressure) + (node.message !== 0 ? 1 : 0)));
     return {
       ...node,
-      belief: nextBelief,
+      theoryIndex: nextTheoryIndex,
+      confidence,
       action: nextAction,
-      lastFlip: sign(nextBelief) !== sign(node.prevBelief) ? world.tick + 1 : node.lastFlip,
+      lastFlip: nextTheoryIndex !== node.prevTheoryIndex ? world.tick + 1 : node.lastFlip,
       energy: clamp(node.energy - spent + (attention >= 3 ? 1 : 0), 0, 9),
       attention,
-      evidenceMemory,
+      anomalyMemory,
     };
   });
 
@@ -731,8 +800,9 @@ function stepWorld(world, options, scenarioId) {
     let rewarded = 0;
     let punished = 0;
     nodes.forEach((node) => {
-      const saidTruth = node.message !== 0 && (node.message === 1) === (world.truth === 1);
-      const saidFalse = node.message !== 0 && !saidTruth;
+      const nearTruth = Math.abs(node.theoryIndex - hiddenIndex) <= MAX_THEORY_INDEX * 0.015;
+      const saidTruth = node.message > 0 && nearTruth;
+      const saidFalse = node.message > 0 && !nearTruth;
       if (saidTruth) {
         node.reputation = clamp(node.reputation + 1, 0, 9);
         node.energy = clamp(node.energy + 1, 0, 9);
@@ -751,16 +821,32 @@ function stepWorld(world, options, scenarioId) {
         if (node.type === 'attention') node.type = 'truth';
         node.checked = true;
       }
-      if (node.belief !== node.prevBelief && Math.abs(node.belief - node.prevBelief) >= 2) {
+      if (node.theoryIndex !== node.prevTheoryIndex && Math.abs(node.theoryIndex - node.prevTheoryIndex) >= 4000) {
         node.reputation = clamp(node.reputation - 1, 0, 9);
       }
     });
     event = { key: 'reveal', data: { rewarded, punished } };
   }
 
+  const avgAnomaly = nodes.reduce((sum, node) => sum + node.anomalyMemory, 0) / Math.max(1, nodes.length);
+  let nextFrontier = clamp(frontier + 0.18, 0, MAX_THEORY_INDEX);
+  let paradigmShiftCount = world.paradigmShiftCount;
+  if (avgAnomaly > 2.45 && frontier < MAX_THEORY_INDEX && (world.tick + 1) % 8 === 0) {
+    nextFrontier = clamp(nextFrontier + 3, 0, MAX_THEORY_INDEX);
+    paradigmShiftCount += 1;
+    event = { key: 'bridge' };
+  }
+  const nextHiddenIndex = normalizeIndex(nextFrontier);
+
   return {
     ...world,
     tick: world.tick + 1,
+    hiddenIndex: nextHiddenIndex,
+    frontier: nextFrontier,
+    paradigmShiftCount,
+    domainRadius: clamp(world.domainRadius + 0.0025, 0, 1),
+    precision: clamp(world.precision + 0.002, 0, 1),
+    frontierPressure: clamp(world.frontierPressure + 0.0015 + (world.tick % 120 === 0 ? 0.04 : 0), 0.08, 1),
     nodes,
     event: event || world.event,
   };
@@ -768,20 +854,32 @@ function stepWorld(world, options, scenarioId) {
 
 function getMetrics(world) {
   const total = world.nodes.length || 1;
-  const acted = world.nodes.filter((n) => n.action !== null);
-  const truthAligned = acted.length ? acted.filter((n) => n.action === world.truth).length / acted.length : 0;
+  const predictionAccuracy = 1 - world.nodes.reduce((sum, node) => (
+    sum + theoryError(node.theoryIndex, stressAt(node.x, node.y, world), world.precision, world.hiddenIndex)
+  ), 0) / total;
   const active = world.nodes.filter((n) => n.message !== 0).length / total;
   const avgRep = world.nodes.reduce((sum, n) => sum + n.reputation, 0) / total;
   const communityMeans = [0, 1, 2, 3].map((c) => {
     const list = world.nodes.filter((n) => n.community === c);
-    return list.length ? list.reduce((sum, n) => sum + n.belief, 0) / list.length : 0;
+    return list.length ? list.reduce((sum, n) => sum + n.theoryIndex, 0) / list.length : 0;
   });
   const globalMean = communityMeans.reduce((sum, v) => sum + v, 0) / 4;
-  const polarization = communityMeans.reduce((sum, v) => sum + (v - globalMean) ** 2, 0) / 4 / 4;
-  const positive = world.nodes.filter((n) => n.belief > 0).length / total;
-  const negative = world.nodes.filter((n) => n.belief < 0).length / total;
-  const undecided = world.nodes.filter((n) => n.action === null).length / total;
-  return { truthAligned, active, avgRep, polarization, positive, negative, undecided };
+  const polarization = communityMeans.reduce((sum, v) => sum + (v - globalMean) ** 2, 0) / 4 / (MAX_THEORY_INDEX ** 2);
+  const scope = world.nodes.reduce((sum, n) => sum + (0.22 + 0.78 * Math.pow(indexDepth(n.theoryIndex), 0.8)), 0) / total;
+  const depth = world.nodes.reduce((sum, n) => sum + indexDepth(n.theoryIndex), 0) / total;
+  const meanIndex = world.nodes.reduce((sum, n) => sum + n.theoryIndex, 0) / total;
+  const anomaly = world.nodes.reduce((sum, n) => sum + n.anomalyMemory, 0) / total / 4;
+  return {
+    predictionAccuracy: clamp(predictionAccuracy, 0, 1),
+    active,
+    avgRep,
+    polarization,
+    scope,
+    depth,
+    meanDepth: indexDepth(meanIndex),
+    frontierDepth: indexDepth(world.hiddenIndex),
+    anomaly: clamp(anomaly, 0, 1),
+  };
 }
 
 function applyIntervention(world, kind, targetId) {
@@ -789,9 +887,10 @@ function applyIntervention(world, kind, targetId) {
   const node = nodes[targetId ?? Math.floor(world.rng() * nodes.length)];
   if (!node) return world;
   if (kind === 'seedTrue') {
-    node.belief = world.truth === 1 ? 2 : -2;
-    node.message = world.truth === 1 ? 1 : -1;
-    node.action = actionFromBelief(node.belief);
+    node.theoryIndex = world.hiddenIndex;
+    node.confidence = 0.72;
+    node.message = 1;
+    node.action = world.hiddenIndex;
     node.energy = 9;
     node.reputation = clamp(node.reputation + 1, 0, 9);
   }
@@ -799,25 +898,28 @@ function applyIntervention(world, kind, targetId) {
     node.type = 'checker';
     node.checked = true;
     node.reputation = 7;
-    node.belief = world.truth === 1 ? 2 : -2;
-    node.message = world.truth === 1 ? 1 : -1;
-    node.action = actionFromBelief(node.belief);
+    node.theoryIndex = world.hiddenIndex;
+    node.confidence = 0.78;
+    node.message = 1;
+    node.action = world.hiddenIndex;
   }
   if (kind === 'bot') {
     node.type = 'bot';
     node.reputation = 5;
     node.energy = 9;
-    node.belief = world.truth === 1 ? -2 : 2;
-    node.message = world.truth === 1 ? -1 : 1;
-    node.action = actionFromBelief(node.belief);
+    node.theoryIndex = normalizeIndex(world.hiddenIndex - 4000);
+    node.confidence = 0.76;
+    node.message = -1;
+    node.action = node.theoryIndex;
   }
   if (kind === 'agitator') {
     node.type = 'agitator';
     node.reputation = 4;
     node.energy = 9;
-    node.belief = node.belief >= 0 ? 2 : -2;
-    node.message = sign(node.belief);
-    node.action = actionFromBelief(node.belief);
+    node.theoryIndex = node.theoryIndex >= world.hiddenIndex ? 0 : MAX_THEORY_INDEX;
+    node.confidence = 0.75;
+    node.message = node.theoryIndex > world.hiddenIndex ? 1 : -1;
+    node.action = node.theoryIndex;
   }
   return {
     ...world,
@@ -874,22 +976,32 @@ function CellCanvas({ world, selected, onSelect }) {
     ctx.fillRect(0, 0, widthPx, heightPx);
 
     world.nodes.forEach((node) => {
-      const palette = {
-        '-2': '#b93848',
-        '-1': '#df8376',
-        0: '#d9d6c8',
-        1: '#6ab8a5',
-        2: '#178f78',
-      };
-      ctx.fillStyle = palette[node.belief];
+      const baseColor = indexToColor(node.theoryIndex);
+      const brightness = 0.52 + node.confidence * 0.58;
+      ctx.fillStyle = baseColor;
+      ctx.globalAlpha = brightness;
       ctx.fillRect(node.x * cell + 0.5, node.y * cell + 0.5, cell - 1, cell - 1);
+      ctx.globalAlpha = 1;
+      if (node.theoryIndex > 0) {
+        ctx.fillStyle = indexToColor(node.theoryIndex - COLOR_STEP);
+        ctx.globalAlpha = 0.72;
+        ctx.beginPath();
+        ctx.arc(node.x * cell + cell * 0.5, node.y * cell + cell * 0.5, Math.max(1, cell * 0.14), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
       if (node.message !== 0) {
-        ctx.fillStyle = node.message > 0 ? '#e9fff7' : '#fff1ef';
+        ctx.fillStyle = node.message > 0 ? '#f3fbff' : '#ffe7e1';
         ctx.globalAlpha = 0.75;
         ctx.beginPath();
         ctx.arc(node.x * cell + cell * 0.5, node.y * cell + cell * 0.5, Math.max(1.2, cell * 0.16), 0, Math.PI * 2);
         ctx.fill();
         ctx.globalAlpha = 1;
+      }
+      if (node.anomalyMemory > 2.2) {
+        ctx.strokeStyle = 'rgba(0,0,0,.48)';
+        ctx.lineWidth = Math.max(1, cell * 0.08);
+        ctx.strokeRect(node.x * cell + 2, node.y * cell + 2, cell - 4, cell - 4);
       }
       if (node.reputation >= 6 || node.type === 'checker' || node.type === 'bot') {
         ctx.strokeStyle = node.type === 'checker' ? '#f1c84c' : node.type === 'bot' ? '#7b5cf0' : 'rgba(255,255,255,.7)';
@@ -1096,7 +1208,7 @@ function App() {
     setWorld((current) => applyIntervention(current, kind, selected));
   }
 
-  const score = Math.round((metrics.truthAligned * 0.55 + (1 - metrics.polarization) * 0.3 + metrics.active * 0.15) * 100);
+  const score = Math.round((metrics.predictionAccuracy * 0.45 + metrics.scope * 0.25 + metrics.depth * 0.2 + (1 - metrics.anomaly) * 0.1) * 100);
 
   return (
     <main className="app-shell">
@@ -1138,11 +1250,11 @@ function App() {
                 <div className="node-grid">
                   <span>{copy.node.coord}</span><strong>{selectedNode.x + 1}, {selectedNode.y + 1}</strong>
                   <span>{copy.node.type}</span><strong>{copy.types[selectedNode.type]}</strong>
-                  <span>{copy.node.belief}</span><strong>{selectedNode.belief}</strong>
+                  <span>{copy.node.belief}</span><strong>{indexToColor(selectedNode.theoryIndex)}</strong>
                   <span>{copy.node.message}</span><strong>{selectedNode.message}</strong>
-                  <span>{copy.node.action}</span><strong>{selectedNode.action ?? 'undecided'}</strong>
+                  <span>{copy.node.action}</span><strong>{Math.round(selectedNode.confidence * 100)}%</strong>
                   <span>{copy.node.reputation}</span><strong>{selectedNode.reputation}</strong>
-                  <span>{copy.node.energy}</span><strong>{selectedNode.energy}</strong>
+                  <span>{copy.node.energy}</span><strong>{selectedNode.energy} / A:{selectedNode.anomalyMemory.toFixed(1)}</strong>
                 </div>
               ) : (
                 <p className="hint">{copy.node.hint}</p>
@@ -1189,11 +1301,11 @@ function App() {
             <div className="truth-strip">
               <div>
                 <Target size={18} />
-                <span>{copy.strip.truth} {world.truth}</span>
+                <span>{copy.strip.truth} {indexToColor(world.hiddenIndex)} · L{world.hiddenIndex}</span>
               </div>
               <div>
                 <Activity size={18} />
-                <span>{copy.strip.tick} {world.tick}</span>
+                <span>{copy.strip.tick} {world.tick} · D{world.domainRadius.toFixed(2)} P{world.precision.toFixed(2)}</span>
               </div>
               <div>
                 <Zap size={18} />
@@ -1202,12 +1314,11 @@ function App() {
             </div>
 
             <div className="legend">
-              <span><i className="c red" />{copy.legend[0]}</span>
-              <span><i className="c pink" />{copy.legend[1]}</span>
-              <span><i className="c neutral" />{copy.legend[2]}</span>
-              <span><i className="c mint" />{copy.legend[3]}</span>
-              <span><i className="c green" />{copy.legend[4]}</span>
-              <span><i className="ring" />{copy.legend[5]}</span>
+              <span><i className="c neutral" />低解释深度</span>
+              <span><i className="c mint" />亮度单调上升</span>
+              <span><i className="c purple" />色相螺旋绕行</span>
+              <span><i className="c gold" />高解释深度</span>
+              <span><i className="ring" />中心点=上一层近似</span>
             </div>
           </section>
 
@@ -1217,13 +1328,19 @@ function App() {
             <Brain size={18} />
             <h2>{copy.status.title}</h2>
           </div>
-          <Meter label={copy.status.truth} value={metrics.truthAligned} />
-          <Meter label={copy.status.active} value={metrics.active} tone="yellow" />
-          <Meter label={copy.status.polar} value={metrics.polarization} tone="red" />
+          <Meter label="Prediction accuracy" value={metrics.predictionAccuracy} />
+          <Meter label="Explanatory scope" value={metrics.scope} tone="yellow" />
+          <Meter label="Paradigm depth" value={metrics.depth} tone="yellow" />
+          <Meter label="Anomaly pressure" value={metrics.anomaly} tone="red" />
+          <div className="ascent-bar">
+            <div className="ascent-gradient" />
+            <span className="ascent-marker society" style={{ left: `${metrics.meanDepth * 100}%` }} />
+            <span className="ascent-marker frontier" style={{ left: `${metrics.frontierDepth * 100}%` }} />
+          </div>
           <div className="split-stat">
-            <span>{copy.status.support0}: {Math.round(metrics.negative * 100)}%</span>
-            <span>{copy.status.support1}: {Math.round(metrics.positive * 100)}%</span>
-            <span>Undecided: {Math.round(metrics.undecided * 100)}%</span>
+            <span>Active speech: {Math.round(metrics.active * 100)}%</span>
+            <span>Polarization: {Math.round(metrics.polarization * 100)}%</span>
+            <span>Paradigm shifts: {world.paradigmShiftCount}</span>
           </div>
           <p className="event-line">{eventText}</p>
         </section>
