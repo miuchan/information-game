@@ -462,6 +462,13 @@ function viewportGrid() {
   };
 }
 
+function shouldFreezeWorldResize() {
+  if (typeof window === 'undefined') return false;
+  const isCoarsePointer = window.matchMedia?.('(pointer: coarse)')?.matches ?? false;
+  const isNarrowViewport = window.matchMedia?.('(max-width: 1024px)')?.matches ?? window.innerWidth <= 1024;
+  return isCoarsePointer && isNarrowViewport;
+}
+
 function communityOf(x, y, width, height) {
   return (x >= width / 2 ? 1 : 0) + (y >= height / 2 ? 2 : 0);
 }
@@ -1018,6 +1025,7 @@ function TheoryModal({ copy, onClose }) {
 }
 
 function App() {
+  const freezeWorldResize = useMemo(() => shouldFreezeWorldResize(), []);
   const [locale, setLocale] = useState('en');
   const [showTheory, setShowTheory] = useState(false);
   const [hideControls, setHideControls] = useState(false);
@@ -1043,6 +1051,7 @@ function App() {
   const controlsToggleTitle = hideControls ? 'Show controls' : 'Hide controls';
 
   useEffect(() => {
+    if (freezeWorldResize) return undefined;
     let resizeTimer = null;
     function handleResize() {
       clearTimeout(resizeTimer);
@@ -1062,7 +1071,7 @@ function App() {
       clearTimeout(resizeTimer);
       window.removeEventListener('resize', handleResize);
     };
-  }, [dimensions, scenario]);
+  }, [dimensions, freezeWorldResize, scenario]);
 
   useEffect(() => {
     if (!running) return undefined;
