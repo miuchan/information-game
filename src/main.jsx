@@ -454,6 +454,8 @@ const EVOLUTION_PACE = {
 
 const MAX_THEORY_INDEX = 8191;
 const COLOR_STEP = 1;
+const VISUAL_BANDS = 256;
+const PARADIGM_JUMP = Math.max(48, Math.floor(MAX_THEORY_INDEX * 0.012));
 const colorCache = new Map();
 
 function normalizeIndex(value) {
@@ -500,14 +502,39 @@ function indexDepth(value) {
   return normalizeIndex(value) / MAX_THEORY_INDEX;
 }
 
+function visualIndex(theoryIndex) {
+  const band = Math.floor((normalizeIndex(theoryIndex) / MAX_THEORY_INDEX) * (VISUAL_BANDS - 1));
+  return Math.round((band / (VISUAL_BANDS - 1)) * MAX_THEORY_INDEX);
+}
+
+function hash2(x, y, seed = 0) {
+  const value = Math.sin(x * 127.1 + y * 311.7 + seed * 74.7) * 43758.5453;
+  return value - Math.floor(value);
+}
+
+function smoothNoise(x, y, seed) {
+  const ix = Math.floor(x);
+  const iy = Math.floor(y);
+  const fx = x - ix;
+  const fy = y - iy;
+  const u = fx * fx * (3 - 2 * fx);
+  const v = fy * fy * (3 - 2 * fy);
+  const a = hash2(ix, iy, seed);
+  const b = hash2(ix + 1, iy, seed);
+  const c = hash2(ix, iy + 1, seed);
+  const d = hash2(ix + 1, iy + 1, seed);
+  const x1 = a * (1 - u) + b * u;
+  const x2 = c * (1 - u) + d * u;
+  return x1 * (1 - v) + x2 * v;
+}
+
 function stressAt(x, y, world) {
-  const cx = (world.width - 1) / 2;
-  const cy = (world.height - 1) / 2;
-  const dx = (x - cx) / Math.max(1, cx);
-  const dy = (y - cy) / Math.max(1, cy);
-  const radial = Math.sqrt(dx * dx + dy * dy);
-  const wave = 0.5 + 0.5 * Math.sin(world.tick * 0.05 + x * 0.09 + y * 0.07);
-  return clamp(radial * 0.75 + wave * world.frontierPressure * 0.45 + world.domainRadius * 0.3, 0, 1);
+  const drift = world.tick * 0.012;
+  const large = smoothNoise(x * 0.055 + drift, y * 0.055 - drift, world.seed);
+  const medium = smoothNoise(x * 0.13 - drift * 1.7, y * 0.13 + drift * 1.1, world.seed + 17);
+  const fine = smoothNoise(x * 0.31 + drift * 2.3, y * 0.31 - drift * 1.9, world.seed + 41);
+  const field = large * 0.55 + medium * 0.3 + fine * 0.15;
+  return clamp(field * 0.72 + world.frontierPressure * 0.18 + world.domainRadius * 0.1, 0, 1);
 }
 
 function theoryError(theoryIndex, contextStress, precision, hiddenIndex) {
@@ -631,6 +658,7 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
         lastFlip: 0,
         attention: 0,
         checked: false,
+        lagResistance: rng(),
         anomalyMemory: rng() * 0.4,
         accuracyStreak: 0,
       });
@@ -777,8 +805,12 @@ function stepWorld(world, options, scenarioId) {
 
     const neighborhoodAvg = neighbors[node.id].reduce((sum, ni) => sum + messaged[ni].theoryIndex, 0) / Math.max(1, neighbors[node.id].length);
     const anomalyDrive = node.anomalyMemory > 2.4 && neighborhoodAvg > node.theoryIndex ? 1 : 0;
-    const netDirection = privatePush + socialPush + attentionPush + anomalyDrive;
-    const stepSize = netDirection === 0 ? 0 : COLOR_STEP;
+    const dynamicResistance = (node.lagResistance || 0) * Math.exp(-node.anomalyMemory * 0.35);
+    const lagDrag = dynamicResistance > 0.82 && rng() < 0.35 ? -1 : 0;
+    const netDirection = privatePush + socialPush + attentionPush + anomalyDrive + lagDrag;
+    const gapToFrontier = Math.max(0, hiddenIndex - node.theoryIndex);
+    const adaptiveStep = clamp(1 + Math.floor(gapToFrontier / 256), 1, 12);
+    const stepSize = netDirection === 0 ? 0 : adaptiveStep * COLOR_STEP;
     const nextTheoryIndex = normalizeIndex(node.theoryIndex + sign(netDirection) * stepSize);
     const confidence = clamp(node.confidence * 0.88 + (netDirection !== 0 ? 0.1 : -0.03) + (Math.abs(hiddenIndex - nextTheoryIndex) < Math.abs(hiddenIndex - node.theoryIndex) ? 0.06 : -0.02), 0.05, 0.99);
     let anomalyMemory = clamp((node.anomalyMemory || 0) * 0.9 + modelError * 0.6 + (challengeGap > 0 ? 0.25 : -0.05), 0, 6);
@@ -836,7 +868,7 @@ function stepWorld(world, options, scenarioId) {
   let nextFrontier = clamp(frontier + 0.18, 0, MAX_THEORY_INDEX);
   let paradigmShiftCount = world.paradigmShiftCount;
   if (avgAnomaly > 2.45 && frontier < MAX_THEORY_INDEX && (world.tick + 1) % 8 === 0) {
-    nextFrontier = clamp(nextFrontier + 3, 0, MAX_THEORY_INDEX);
+    nextFrontier = clamp(nextFrontier + PARADIGM_JUMP, 0, MAX_THEORY_INDEX);
     paradigmShiftCount += 1;
     event = { key: 'bridge' };
   }
@@ -980,14 +1012,15 @@ function CellCanvas({ world, selected, onSelect }) {
     ctx.fillRect(0, 0, widthPx, heightPx);
 
     world.nodes.forEach((node) => {
-      const baseColor = indexToColor(node.theoryIndex);
+      const visibleIndex = visualIndex(node.theoryIndex);
+      const baseColor = indexToColor(visibleIndex);
       const brightness = 0.52 + node.confidence * 0.58;
       ctx.fillStyle = baseColor;
       ctx.globalAlpha = brightness;
       ctx.fillRect(node.x * cell + 0.5, node.y * cell + 0.5, cell - 1, cell - 1);
       ctx.globalAlpha = 1;
-      if (node.theoryIndex > 0) {
-        ctx.fillStyle = indexToColor(node.theoryIndex - COLOR_STEP);
+      if (visibleIndex > 0) {
+        ctx.fillStyle = indexToColor(Math.max(0, visibleIndex - Math.floor(MAX_THEORY_INDEX / VISUAL_BANDS)));
         ctx.globalAlpha = 0.72;
         ctx.beginPath();
         ctx.arc(node.x * cell + cell * 0.5, node.y * cell + cell * 0.5, Math.max(1, cell * 0.14), 0, Math.PI * 2);
