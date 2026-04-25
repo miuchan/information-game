@@ -452,15 +452,48 @@ const EVOLUTION_PACE = {
   weakPushAdoption: 0.6,
 };
 
-const MAX_THEORY_INDEX = 0xFFFFFF;
+const MAX_THEORY_INDEX = 8191;
 const COLOR_STEP = 1;
+const colorCache = new Map();
 
 function normalizeIndex(value) {
   return clamp(Math.round(value), 0, MAX_THEORY_INDEX);
 }
 
 function indexToColor(value) {
-  return `#${normalizeIndex(value).toString(16).padStart(6, '0')}`;
+  const index = normalizeIndex(value);
+  if (colorCache.has(index)) return colorCache.get(index);
+  const s = index / MAX_THEORY_INDEX;
+  const lightness = 0.18 + 0.78 * Math.pow(s, 0.92);
+  const chroma = 0.03 + 0.12 * (Math.sin(Math.PI * s) ** 2);
+  const hueDeg = (260 + 360 * 7 * s) % 360;
+  const hueRad = (hueDeg * Math.PI) / 180;
+  const a = chroma * Math.cos(hueRad);
+  const b = chroma * Math.sin(hueRad);
+
+  const l = lightness + 0.3963377774 * a + 0.2158037573 * b;
+  const m = lightness - 0.1055613458 * a - 0.0638541728 * b;
+  const sLinear = lightness - 0.0894841775 * a - 1.291485548 * b;
+
+  const l3 = l ** 3;
+  const m3 = m ** 3;
+  const s3 = sLinear ** 3;
+
+  const linearR = +4.0767416621 * l3 - 3.3077115913 * m3 + 0.2309699292 * s3;
+  const linearG = -1.2684380046 * l3 + 2.6097574011 * m3 - 0.3413193965 * s3;
+  const linearB = -0.0041960863 * l3 - 0.7034186147 * m3 + 1.707614701 * s3;
+
+  const toSrgb = (linear) => {
+    const clamped = clamp(linear, 0, 1);
+    if (clamped <= 0.0031308) return clamped * 12.92;
+    return 1.055 * (clamped ** (1 / 2.4)) - 0.055;
+  };
+  const r = Math.round(toSrgb(linearR) * 255);
+  const g = Math.round(toSrgb(linearG) * 255);
+  const blue = Math.round(toSrgb(linearB) * 255);
+  const color = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${blue.toString(16).padStart(2, '0')}`;
+  colorCache.set(index, color);
+  return color;
 }
 
 function indexDepth(value) {
@@ -558,13 +591,13 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
   }[scenarioId];
   const hiddenIndex = normalizeIndex(
     {
-      scarce: 0x111111,
-      polarized: 0x222222,
-      anonymous: 0x262626,
-      viral: 0x2f2f2f,
-      bridge: 0x3a3a3a,
-      market: 0x444444,
-    }[scenarioId] + Math.floor(rng() * 0x0f0f0f),
+      scarce: 620,
+      polarized: 940,
+      anonymous: 1120,
+      viral: 1280,
+      bridge: 1520,
+      market: 1680,
+    }[scenarioId] + Math.floor(rng() * 240),
   );
 
   for (let y = 0; y < height; y += 1) {
@@ -577,8 +610,8 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
       const type = roll < 0.22 ? 'truth' : roll < 0.58 ? 'social' : roll < 0.82 ? 'attention' : 'stubborn';
       const startIndex = normalizeIndex(
         hiddenIndex
-        - Math.floor((0.08 + Math.max(0, -localBias) * 0.14) * MAX_THEORY_INDEX)
-        + (rng() < settings.initialSignalRate ? Math.floor((rng() < settings.initialSignalAccuracy ? 1 : -1) * MAX_THEORY_INDEX * 0.015) : 0),
+        - Math.floor((0.06 + Math.max(0, -localBias) * 0.11) * MAX_THEORY_INDEX)
+        + (rng() < settings.initialSignalRate ? Math.floor((rng() < settings.initialSignalAccuracy ? 1 : -1) * MAX_THEORY_INDEX * 0.01) : 0),
       );
       nodes.push({
         id: idx(x, y, width),
@@ -611,8 +644,8 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
       [cx - 1, cx, cx + 1].forEach((x) => {
         if (x < 0 || x >= width) return;
         const node = nodes[idx(x, y, width)];
-        node.theoryIndex = 0x1a1a1a;
-        node.prevTheoryIndex = 0x1a1a1a;
+        node.theoryIndex = 700;
+        node.prevTheoryIndex = 700;
         node.confidence = 0.62;
         node.message = -1;
         node.action = node.theoryIndex;
@@ -629,6 +662,7 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
     height,
     cellSize,
     hiddenIndex,
+    frontier: hiddenIndex,
     domainRadius: 0.28,
     precision: 0.2,
     frontierPressure: scenarioId === 'bridge' ? 0.22 : 0.12,
@@ -705,14 +739,21 @@ function stepWorld(world, options, scenarioId) {
 
   const revealTick = (world.tick + 1) % EVOLUTION_PACE.revealCadence === 0;
   const hiddenIndex = world.hiddenIndex;
+  const frontier = world.frontier ?? hiddenIndex;
 
   const nodes = messaged.map((node) => {
     const contextStress = stressAt(node.x, node.y, world);
     let privatePush = 0;
     const baseRate = node.type === 'checker' ? settings.signalRate * 8 : settings.signalRate;
     const rate = baseRate * EVOLUTION_PACE.privateSignal;
-    const modelError = theoryError(node.theoryIndex, contextStress, world.precision, hiddenIndex);
-    if (rng() < rate && rng() < settings.signalAccuracy) privatePush = sign(hiddenIndex - node.theoryIndex);
+    const frontierMix = clamp(0.1 + world.frontierPressure * 0.32, 0.08, 0.45);
+    const frontierBand = Math.max(8, Math.floor(MAX_THEORY_INDEX * 0.07));
+    const challengeDifficulty = rng() < frontierMix
+      ? normalizeIndex(frontier - Math.floor(rng() * frontierBand))
+      : Math.floor(rng() * Math.max(1, frontier - frontierBand));
+    const challengeGap = challengeDifficulty - node.theoryIndex;
+    const modelError = theoryError(node.theoryIndex, contextStress, world.precision, hiddenIndex) + Math.max(0, challengeGap) / MAX_THEORY_INDEX;
+    if (rng() < rate && rng() < settings.signalAccuracy) privatePush = sign(challengeGap);
 
     const pressure = pressureFor(node, messaged, neighbors, options);
     let threshold = 1.2;
@@ -734,12 +775,13 @@ function stepWorld(world, options, scenarioId) {
     let attentionPush = options.hotRanking && node.type === 'attention' && Math.abs(pressure) > 3.1 ? sign(pressure) : 0;
     if (attentionPush !== 0 && rng() > EVOLUTION_PACE.attentionAdoption) attentionPush = 0;
 
-    const anomalyDrive = node.anomalyMemory > 2.4 ? 1 : 0;
+    const neighborhoodAvg = neighbors[node.id].reduce((sum, ni) => sum + messaged[ni].theoryIndex, 0) / Math.max(1, neighbors[node.id].length);
+    const anomalyDrive = node.anomalyMemory > 2.4 && neighborhoodAvg > node.theoryIndex ? 1 : 0;
     const netDirection = privatePush + socialPush + attentionPush + anomalyDrive;
     const stepSize = netDirection === 0 ? 0 : COLOR_STEP;
     const nextTheoryIndex = normalizeIndex(node.theoryIndex + sign(netDirection) * stepSize);
     const confidence = clamp(node.confidence * 0.88 + (netDirection !== 0 ? 0.1 : -0.03) + (Math.abs(hiddenIndex - nextTheoryIndex) < Math.abs(hiddenIndex - node.theoryIndex) ? 0.06 : -0.02), 0.05, 0.99);
-    let anomalyMemory = clamp((node.anomalyMemory || 0) * 0.9 + modelError * 0.65 + (nextTheoryIndex < hiddenIndex ? 0.12 : -0.06), 0, 6);
+    let anomalyMemory = clamp((node.anomalyMemory || 0) * 0.9 + modelError * 0.6 + (challengeGap > 0 ? 0.25 : -0.05), 0, 6);
     if (revealTick && (node.checked || rng() < settings.publicEvidenceRate * EVOLUTION_PACE.revealAudience)) anomalyMemory = clamp(anomalyMemory + 0.45, 0, 6);
 
     const nextAction = nextTheoryIndex;
@@ -790,18 +832,20 @@ function stepWorld(world, options, scenarioId) {
   }
 
   const avgAnomaly = nodes.reduce((sum, node) => sum + node.anomalyMemory, 0) / Math.max(1, nodes.length);
-  let nextHiddenIndex = hiddenIndex;
+  let nextFrontier = clamp(frontier + 0.18, 0, MAX_THEORY_INDEX);
   let paradigmShiftCount = world.paradigmShiftCount;
-  if (avgAnomaly > 2.45 && hiddenIndex < MAX_THEORY_INDEX && (world.tick + 1) % 8 === 0) {
-    nextHiddenIndex = normalizeIndex(hiddenIndex + COLOR_STEP);
+  if (avgAnomaly > 2.45 && frontier < MAX_THEORY_INDEX && (world.tick + 1) % 8 === 0) {
+    nextFrontier = clamp(nextFrontier + 3, 0, MAX_THEORY_INDEX);
     paradigmShiftCount += 1;
     event = { key: 'bridge' };
   }
+  const nextHiddenIndex = normalizeIndex(nextFrontier);
 
   return {
     ...world,
     tick: world.tick + 1,
     hiddenIndex: nextHiddenIndex,
+    frontier: nextFrontier,
     paradigmShiftCount,
     domainRadius: clamp(world.domainRadius + 0.0025, 0, 1),
     precision: clamp(world.precision + 0.002, 0, 1),
@@ -826,8 +870,19 @@ function getMetrics(world) {
   const polarization = communityMeans.reduce((sum, v) => sum + (v - globalMean) ** 2, 0) / 4 / (MAX_THEORY_INDEX ** 2);
   const scope = world.nodes.reduce((sum, n) => sum + (0.22 + 0.78 * Math.pow(indexDepth(n.theoryIndex), 0.8)), 0) / total;
   const depth = world.nodes.reduce((sum, n) => sum + indexDepth(n.theoryIndex), 0) / total;
+  const meanIndex = world.nodes.reduce((sum, n) => sum + n.theoryIndex, 0) / total;
   const anomaly = world.nodes.reduce((sum, n) => sum + n.anomalyMemory, 0) / total / 4;
-  return { predictionAccuracy: clamp(predictionAccuracy, 0, 1), active, avgRep, polarization, scope, depth, anomaly: clamp(anomaly, 0, 1) };
+  return {
+    predictionAccuracy: clamp(predictionAccuracy, 0, 1),
+    active,
+    avgRep,
+    polarization,
+    scope,
+    depth,
+    meanDepth: indexDepth(meanIndex),
+    frontierDepth: indexDepth(world.hiddenIndex),
+    anomaly: clamp(anomaly, 0, 1),
+  };
 }
 
 function applyIntervention(world, kind, targetId) {
@@ -1249,7 +1304,7 @@ function App() {
             <div className="truth-strip">
               <div>
                 <Target size={18} />
-                <span>{copy.strip.truth} {indexToColor(world.hiddenIndex)}</span>
+                <span>{copy.strip.truth} {indexToColor(world.hiddenIndex)} · L{world.hiddenIndex}</span>
               </div>
               <div>
                 <Activity size={18} />
@@ -1262,11 +1317,11 @@ function App() {
             </div>
 
             <div className="legend">
-              <span><i className="c neutral" />#000000 起点</span>
-              <span><i className="c mint" />连续色阶上升</span>
-              <span><i className="c purple" />每次更新前进 1 色阶</span>
-              <span><i className="c gold" />#FFFFFF 终点</span>
-              <span><i className="ring" />中心点=上一色阶</span>
+              <span><i className="c neutral" />低解释深度</span>
+              <span><i className="c mint" />亮度单调上升</span>
+              <span><i className="c purple" />色相螺旋绕行</span>
+              <span><i className="c gold" />高解释深度</span>
+              <span><i className="ring" />中心点=上一层近似</span>
             </div>
           </section>
 
@@ -1280,6 +1335,11 @@ function App() {
           <Meter label="Explanatory scope" value={metrics.scope} tone="yellow" />
           <Meter label="Paradigm depth" value={metrics.depth} tone="yellow" />
           <Meter label="Anomaly pressure" value={metrics.anomaly} tone="red" />
+          <div className="ascent-bar">
+            <div className="ascent-gradient" />
+            <span className="ascent-marker society" style={{ left: `${metrics.meanDepth * 100}%` }} />
+            <span className="ascent-marker frontier" style={{ left: `${metrics.frontierDepth * 100}%` }} />
+          </div>
           <div className="split-stat">
             <span>Active speech: {Math.round(metrics.active * 100)}%</span>
             <span>Polarization: {Math.round(metrics.polarization * 100)}%</span>
