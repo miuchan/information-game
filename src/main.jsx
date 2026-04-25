@@ -466,6 +466,7 @@ const VISUAL_BANDS = 256;
 const PARADIGM_JUMP = 128;
 const CHUNK_SIZE = 32;
 const ANOMALY_GAIN = 42;
+const TIME_SCALES = [1, 4, 16, 64, 256];
 const colorCache = new Map();
 
 function normalizeIndex(value) {
@@ -854,6 +855,9 @@ function stepWorld(world, options, scenarioId) {
   const frontierNeighborWindow = 180;
   const breakthroughThreshold = 1.15;
   const confusionLimit = 1.6;
+  const anomalyWave = new Float32Array(messaged.length);
+  const translationWave = new Float32Array(messaged.length);
+  const confidenceWave = new Float32Array(messaged.length);
 
   const nodes = messaged.map((node) => {
     const contextStress = stressAt(node.x, node.y, world);
@@ -914,14 +918,20 @@ function stepWorld(world, options, scenarioId) {
     const lagToMax = currentMaxTheoryIndex - node.theoryIndex;
     const closeToFrontier = lagToMax >= 0 && lagToMax <= frontierLagWindow;
     const frontierContact = neighbors[node.id].some((ni) => messaged[ni].theoryIndex >= currentMaxTheoryIndex - frontierNeighborWindow);
-    if ((confusionMemory > 1.2 || anomalyMemory > 1.8 || currentMaxTheoryIndex - node.theoryIndex > 96) && frontierContact) {
-      const translatorNearby = neighbors[node.id].some(
-        (ni) => messaged[ni].theoryIndex > node.theoryIndex && (messaged[ni].reputation || 0) >= 5,
-      );
-      if (translatorNearby) {
-        confusionMemory = clamp(confusionMemory * 0.72, 0, 6);
-        anomalyMemory = clamp(anomalyMemory + 0.32, 0, 6);
-        translation = clamp(translation + 0.4, 0, 6);
+    if ((confusionMemory > 1.0 || anomalyMemory > 1.4 || currentMaxTheoryIndex - node.theoryIndex > 96) && frontierContact) {
+      let bestScore = -Infinity;
+      neighbors[node.id].forEach((ni) => {
+        const other = messaged[ni];
+        const distance = other.theoryIndex - node.theoryIndex;
+        if (distance <= 24 || distance > PHASES * 0.9) return;
+        const score = (other.reputation || 0) * 0.35 + (other.translation || 0) * 0.45 + (other.confidence || 0) * 0.2;
+        if (score > bestScore) bestScore = score;
+      });
+      if (bestScore > 0) {
+        const effectiveness = clamp(bestScore / 8, 0.2, 1);
+        confusionMemory = clamp(confusionMemory * (0.88 - 0.2 * effectiveness), 0, 6);
+        anomalyMemory = clamp(anomalyMemory + 0.2 + 0.45 * effectiveness, 0, 6);
+        translation = clamp(translation + 0.28 + 0.4 * effectiveness, 0, 6);
       }
     }
     const interpretableConfusion = confusionMemory < confusionLimit || (frontierContact && anomalyMemory > breakthroughThreshold * 1.4);
@@ -935,8 +945,20 @@ function stepWorld(world, options, scenarioId) {
       anomalyMemory *= 0.25;
       confusionMemory *= 0.5;
       translation = clamp(translation + 0.8, 0, 6);
+      neighbors[node.id].forEach((ni) => {
+        if (messaged[ni].theoryIndex >= nextTheoryIndex) return;
+        anomalyWave[ni] += 0.2;
+        translationWave[ni] += 0.14;
+        confidenceWave[ni] += 0.05;
+      });
     }
     if (revealTick && (node.checked || rng() < settings.publicEvidenceRate * EVOLUTION_PACE.revealAudience)) anomalyMemory = clamp(anomalyMemory + 0.45, 0, 6);
+
+    const microLearnGain = Math.floor(productive * 12)
+      + (anomalyMemory > 1.7 ? 2 : 0)
+      + (anomalyMemory > 2.5 ? 4 : 0)
+      + (translation > 1 ? 2 : 0);
+    if (microLearnGain > 0) nextTheoryIndex = normalizeIndex(nextTheoryIndex + microLearnGain);
 
     const nextAction = nextTheoryIndex;
     const spent = node.message === 0 ? 0 : node.type === 'attention' || node.type === 'agitator' ? 2 : 1;
@@ -956,6 +978,12 @@ function stepWorld(world, options, scenarioId) {
       translation,
       exposureDepth,
     };
+  });
+
+  nodes.forEach((node, i) => {
+    if (anomalyWave[i] > 0) node.anomalyMemory = clamp(node.anomalyMemory + anomalyWave[i], 0, 6);
+    if (translationWave[i] > 0) node.translation = clamp((node.translation || 0) + translationWave[i], 0, 6);
+    if (confidenceWave[i] > 0) node.confidence = clamp(node.confidence + confidenceWave[i], 0.05, 0.99);
   });
 
   if (revealTick) {
@@ -1036,11 +1064,17 @@ function getMetrics(world) {
   const anomaly = world.nodes.reduce((sum, n) => sum + n.anomalyMemory, 0) / total / 4;
   const confusionLoad = world.nodes.reduce((sum, n) => sum + (n.confusionMemory || 0), 0) / total / 6;
   const translationRate = world.nodes.reduce((sum, n) => sum + (n.translation || 0), 0) / total / 6;
-  const learningVelocity = world.nodes.reduce((sum, n) => sum + Math.abs(n.theoryIndex - n.prevTheoryIndex), 0) / total / PARADIGM_JUMP;
+  const deltas = world.nodes.map((n) => Math.abs(n.theoryIndex - n.prevTheoryIndex));
+  const changed = deltas.filter((value) => value > 0);
+  const changedCellsRate = changed.length / total;
+  const avgDeltaPerChanged = changed.length ? changed.reduce((sum, value) => sum + value, 0) / changed.length : 0;
+  const learningVelocity = clamp(changedCellsRate * (avgDeltaPerChanged / Math.max(1, PARADIGM_JUMP * 1.5)), 0, 1);
   const socialFrontier = world.socialFrontierRank ?? percentile(world.nodes.map((n) => n.theoryIndex), 0.95);
   const exposureFrontier = world.exposureFrontierRank ?? Math.min(world.frontier ?? world.hiddenIndex, socialFrontier + PARADIGM_JUMP * 2);
   const frontierGap = clamp((world.hiddenIndex - socialFrontier) / (PHASES * 2), 0, 1);
-  const highestOrder = orderOf(world.nodes.reduce((max, n) => Math.max(max, n.theoryIndex), 0));
+  const speculativeOrder = orderOf(world.nodes.reduce((max, n) => Math.max(max, n.theoryIndex), 0));
+  const highestStableOrder = orderOf(socialFrontier);
+  const outlierRate = world.nodes.filter((n) => n.theoryIndex > socialFrontier + PARADIGM_JUMP * 2).length / total;
   const orderSkylineCounts = new Array(ORDERS).fill(0);
   world.nodes.forEach((node) => {
     orderSkylineCounts[orderOf(node.theoryIndex)] += 1;
@@ -1060,7 +1094,11 @@ function getMetrics(world) {
     translationRate: clamp(translationRate, 0, 1),
     learningVelocity: clamp(learningVelocity, 0, 1),
     frontierGap,
-    highestOrder,
+    changedCellsRate: clamp(changedCellsRate, 0, 1),
+    avgDeltaPerChanged,
+    highestStableOrder,
+    speculativeOrder,
+    outlierRate: clamp(outlierRate, 0, 1),
     socialFrontier,
     exposureFrontier,
     orderSkyline,
@@ -1180,9 +1218,10 @@ function CellCanvas({
         const brightness = 0.52 + node.confidence * 0.58;
         ctx.fillStyle = baseColor;
         ctx.globalAlpha = brightness;
-        ctx.fillRect(sx + 0.5, sy + 0.5, cell - 1, cell - 1);
+        const fillInset = cell >= 6 ? 0.5 : 0;
+        ctx.fillRect(sx + fillInset, sy + fillInset, Math.max(1, cell - fillInset * 2), Math.max(1, cell - fillInset * 2));
         ctx.globalAlpha = 1;
-        if (visibleIndex > 0) {
+        if (visibleIndex > 0 && cell >= 8) {
           ctx.fillStyle = indexToColor(Math.max(0, visibleIndex - Math.floor(MAX_THEORY_INDEX / VISUAL_BANDS)));
           ctx.globalAlpha = 0.72;
           ctx.beginPath();
@@ -1190,7 +1229,7 @@ function CellCanvas({
           ctx.fill();
           ctx.globalAlpha = 1;
         }
-        if (node.message !== 0) {
+        if (node.message !== 0 && cell >= 8) {
           ctx.fillStyle = node.message > 0 ? '#f3fbff' : '#ffe7e1';
           ctx.globalAlpha = 0.75;
           ctx.beginPath();
@@ -1198,16 +1237,16 @@ function CellCanvas({
           ctx.fill();
           ctx.globalAlpha = 1;
         }
-        if (node.productiveSignal > 0.55) {
+        if (node.productiveSignal > 0.55 && cell >= 7) {
           ctx.strokeStyle = indexToColor(Math.min(MAX_THEORY_INDEX, visibleIndex + Math.floor(MAX_THEORY_INDEX / VISUAL_BANDS)));
           ctx.lineWidth = Math.max(1, cell * 0.09);
           ctx.strokeRect(sx + 1.5, sy + 1.5, cell - 3, cell - 3);
-        } else if (node.confusionMemory > 1.4) {
+        } else if (node.confusionMemory > 1.4 && cell >= 7) {
           ctx.strokeStyle = 'rgba(70,70,70,.55)';
           ctx.lineWidth = Math.max(1, cell * 0.08);
           ctx.strokeRect(sx + 2, sy + 2, cell - 4, cell - 4);
         }
-        if (node.reputation >= 6 || node.type === 'checker' || node.type === 'bot') {
+        if ((node.reputation >= 6 || node.type === 'checker' || node.type === 'bot') && cell >= 9) {
           ctx.strokeStyle = node.type === 'checker' ? '#f1c84c' : node.type === 'bot' ? '#7b5cf0' : 'rgba(255,255,255,.7)';
           ctx.lineWidth = Math.max(1, cell * 0.12);
           ctx.strokeRect(sx + 1, sy + 1, cell - 2, cell - 2);
@@ -1414,6 +1453,7 @@ function App() {
   const [world, setWorld] = useState(() => createWorld(Date.now(), 'scarce', viewportGrid()));
   const [running, setRunning] = useState(false);
   const [speed, setSpeed] = useState(290);
+  const [timeScale, setTimeScale] = useState(1);
   const [selected, setSelected] = useState(null);
   const [camera, setCamera] = useState({ x: 0, y: 0, zoom: 1 });
   const [budget, setBudget] = useState(9);
@@ -1466,10 +1506,14 @@ function App() {
   useEffect(() => {
     if (!running) return undefined;
     const id = setInterval(() => {
-      setWorld((current) => stepWorld(current, options, scenario));
+      setWorld((current) => {
+        let next = current;
+        for (let i = 0; i < timeScale; i += 1) next = stepWorld(next, options, scenario);
+        return next;
+      });
     }, speed);
     return () => clearInterval(id);
-  }, [running, speed, options, scenario]);
+  }, [running, speed, timeScale, options, scenario]);
 
   function reset(nextScenario = scenario) {
     setScenario(nextScenario);
@@ -1486,6 +1530,25 @@ function App() {
     setBudget((b) => b - item.cost);
     setWorld((current) => applyIntervention(current, kind, selected));
   }
+
+  function fastForwardToLift(maxTicks = 5000) {
+    setWorld((current) => {
+      let next = current;
+      const initialOrder = orderOf(current.socialFrontierRank ?? current.hiddenIndex);
+      const initialParadigm = current.paradigmShiftCount;
+      for (let i = 0; i < maxTicks; i += 1) {
+        next = stepWorld(next, options, scenario);
+        const nextOrder = orderOf(next.socialFrontierRank ?? next.hiddenIndex);
+        if (next.paradigmShiftCount > initialParadigm || nextOrder > initialOrder) break;
+      }
+      return next;
+    });
+  }
+
+  let diagnosticState = 'Learning';
+  if (metrics.translationRate < 0.01 && metrics.anomaly > 0.15) diagnosticState = 'Translation stalled';
+  else if (metrics.learningVelocity < 0.01 && metrics.active > 0.1) diagnosticState = 'Discursive stagnation';
+  else if (metrics.confusionLoad > 0.45) diagnosticState = 'Overwhelmed';
 
   const score = Math.round((metrics.predictionAccuracy * 0.45 + metrics.scope * 0.25 + metrics.depth * 0.2 + (1 - metrics.anomaly) * 0.1) * 100);
 
@@ -1518,6 +1581,12 @@ function App() {
             <section className="panel-block compact">
               <label htmlFor="speed">{copy.sections.speed}</label>
               <input id="speed" type="range" min="60" max="520" step="20" value={580 - speed} onChange={(e) => setSpeed(580 - Number(e.target.value))} />
+              <label htmlFor="timescale">Time scale</label>
+              <select id="timescale" value={timeScale} onChange={(e) => setTimeScale(Number(e.target.value))}>
+                {TIME_SCALES.map((value) => (
+                  <option key={value} value={value}>{value}×</option>
+                ))}
+              </select>
             </section>
 
             <section className="panel-block node-card">
@@ -1571,6 +1640,9 @@ function App() {
                 <button className="icon-button" onClick={() => setWorld((current) => stepWorld(current, options, scenario))} type="button" title={copy.meta.step}>
                   <FastForward size={18} />
                 </button>
+                <button className="icon-button" onClick={() => fastForwardToLift()} type="button" title="Fast-forward to next lift event">
+                  <CheckCircle2 size={18} />
+                </button>
                 <button className="icon-button" onClick={() => reset()} type="button" title={copy.meta.reset}>
                   <RefreshCcw size={18} />
                 </button>
@@ -1584,7 +1656,7 @@ function App() {
               </div>
               <div>
                 <Activity size={18} />
-                <span>{copy.strip.tick} {world.tick} · H:{orderOf(world.hiddenIndex)} / S:{orderOf(metrics.socialFrontier)} / E:{orderOf(metrics.exposureFrontier)}</span>
+                <span>{copy.strip.tick} {world.tick} · H:{orderOf(world.hiddenIndex)} / S:{orderOf(metrics.socialFrontier)} / E:{orderOf(metrics.exposureFrontier)} · {timeScale}× · {diagnosticState}</span>
               </div>
               <div>
                 <Zap size={18} />
@@ -1620,8 +1692,13 @@ function App() {
           </div>
           <div className="split-stat">
             <span>Active speech: {Math.round(metrics.active * 100)}%</span>
-            <span>Highest active order: S^{metrics.highestOrder}</span>
+            <span>Social p95: S^{metrics.highestStableOrder} / Speculative max: S^{metrics.speculativeOrder}</span>
+            <span>Outliers: {Math.round(metrics.outlierRate * 100)}%</span>
             <span>Paradigm shifts: {world.paradigmShiftCount}</span>
+          </div>
+          <div className="split-stat">
+            <span>Changed cells: {Math.round(metrics.changedCellsRate * 100)}%</span>
+            <span>Avg delta/chg: {metrics.avgDeltaPerChanged.toFixed(1)} phase</span>
           </div>
           <div className="order-skyline">
             {orderBands.map((band) => (
