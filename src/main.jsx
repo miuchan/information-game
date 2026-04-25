@@ -501,13 +501,16 @@ function indexDepth(value) {
 }
 
 function stressAt(x, y, world) {
-  const cx = (world.width - 1) / 2;
-  const cy = (world.height - 1) / 2;
-  const dx = (x - cx) / Math.max(1, cx);
-  const dy = (y - cy) / Math.max(1, cy);
-  const radial = Math.sqrt(dx * dx + dy * dy);
-  const wave = 0.5 + 0.5 * Math.sin(world.tick * 0.05 + x * 0.09 + y * 0.07);
-  return clamp(radial * 0.75 + wave * world.frontierPressure * 0.45 + world.domainRadius * 0.3, 0, 1);
+  const driftX = ((Math.sin(world.tick * 0.011) + 1) * 0.5) * (world.width - 1);
+  const driftY = ((Math.cos(world.tick * 0.013) + 1) * 0.5) * (world.height - 1);
+  const dx = x - driftX;
+  const dy = y - driftY;
+  const sigma = Math.max(5, Math.min(world.width, world.height) * 0.2);
+  const movingHotspot = Math.exp(-(dx * dx + dy * dy) / (2 * sigma * sigma));
+  const waveA = 0.5 + 0.5 * Math.sin(world.tick * 0.05 + x * 0.08 + y * 0.06);
+  const waveB = 0.5 + 0.5 * Math.cos(world.tick * 0.035 - x * 0.05 + y * 0.1);
+  const texture = 0.55 * waveA + 0.45 * waveB;
+  return clamp(0.14 + texture * 0.42 + movingHotspot * 0.5 + world.frontierPressure * 0.26 + world.domainRadius * 0.2, 0, 1);
 }
 
 function theoryError(theoryIndex, contextStress, precision, hiddenIndex) {
@@ -692,6 +695,8 @@ function generateMessage(node, oldNodes, neighbors, options, rng) {
   else if (node.type === 'attention') msg = Math.abs(delta) > MAX_THEORY_INDEX * 0.01 ? sign(delta) : (rng() < 0.18 ? 1 : 0);
   else if (node.type === 'stubborn') msg = node.anomalyMemory > 2.8 ? 1 : 0;
   else if (node.type === 'agitator') msg = rng() < 0.75 ? -1 : 1;
+  const baselineTalkChance = 0.06 + node.confidence * 0.12 + (node.type === 'attention' ? 0.16 : 0);
+  if (msg === 0 && rng() < baselineTalkChance) msg = delta === 0 ? (rng() < 0.5 ? 1 : -1) : sign(delta);
   if (options.hotRanking && node.type === 'attention' && rng() < 0.22) msg = rng() < 0.8 ? 1 : -1;
   if (node.energy <= 0 && node.type !== 'checker') return 0;
   return msg;
