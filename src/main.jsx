@@ -550,8 +550,8 @@ function theoryError(theoryIndex, contextStress, precision, hiddenIndex) {
 
 function productiveAnomaly(gap) {
   if (gap <= 0) return 0;
-  const idealGap = 64;
-  const width = 96;
+  const idealGap = PARADIGM_JUMP * 0.8;
+  const width = PARADIGM_JUMP * 2.5;
   return Math.exp(-((gap - idealGap) ** 2) / (2 * width ** 2));
 }
 
@@ -559,6 +559,12 @@ function confusionPressure(gap) {
   if (gap <= 0) return 0;
   const productive = productiveAnomaly(gap);
   return Math.min(1, gap / 512) * (1 - productive);
+}
+
+function percentile(values, p) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor((sorted.length - 1) * clamp(p, 0, 1))];
 }
 
 function viewportGrid() {
@@ -729,6 +735,7 @@ function scenarioSettings(id) {
 
 function generateMessage(node, oldNodes, neighbors, options, rng) {
   if (node.type === 'bot') return -1;
+  if ((node.confusionMemory || 0) > 2.6 && node.type !== 'agitator' && rng() < 0.55) return 0;
   const localIndex = neighbors[node.id].reduce((sum, ni) => sum + oldNodes[ni].theoryIndex, 0) / Math.max(1, neighbors[node.id].length);
   const delta = localIndex - node.theoryIndex;
   let msg = 0;
@@ -786,6 +793,8 @@ function stepWorld(world, options, scenarioId) {
   const hiddenIndex = world.hiddenIndex;
   const frontier = world.frontier ?? hiddenIndex;
   const currentMaxTheoryIndex = oldNodes.reduce((max, node) => Math.max(max, node.theoryIndex), 0);
+  const socialFrontier = percentile(oldNodes.map((node) => node.theoryIndex), 0.95);
+  const exposureFrontier = Math.min(frontier, socialFrontier + PARADIGM_JUMP * 2);
   const frontierLagWindow = 220;
   const frontierNeighborWindow = 180;
   const breakthroughThreshold = 1.15;
@@ -799,11 +808,13 @@ function stepWorld(world, options, scenarioId) {
     const frontierMix = clamp(0.1 + world.frontierPressure * 0.32, 0.08, 0.45);
     const frontierBand = Math.max(8, Math.floor(MAX_THEORY_INDEX * 0.07));
     const challengeDifficulty = rng() < frontierMix
-      ? normalizeIndex(frontier - Math.floor(rng() * frontierBand))
-      : Math.floor(rng() * Math.max(1, frontier - frontierBand));
+      ? normalizeIndex(exposureFrontier - Math.floor(rng() * frontierBand))
+      : Math.floor(rng() * Math.max(1, exposureFrontier - frontierBand));
+    const neighborhoodAvg = neighbors[node.id].reduce((sum, ni) => sum + messaged[ni].theoryIndex, 0) / Math.max(1, neighbors[node.id].length);
     const challengeGap = challengeDifficulty - node.theoryIndex;
     const rawGap = Math.max(0, challengeGap);
-    const productive = productiveAnomaly(rawGap);
+    const intelligibleGap = challengeDifficulty - Math.max(node.theoryIndex, neighborhoodAvg - PARADIGM_JUMP);
+    const productive = productiveAnomaly(Math.max(0, intelligibleGap));
     const confusion = confusionPressure(rawGap);
     const modelError = theoryError(node.theoryIndex, contextStress, world.precision, hiddenIndex) + productive * 0.55;
     if (rng() < rate && rng() < settings.signalAccuracy) privatePush = productive > 0.18 ? sign(challengeGap) : 0;
@@ -828,17 +839,16 @@ function stepWorld(world, options, scenarioId) {
     let attentionPush = options.hotRanking && node.type === 'attention' && Math.abs(pressure) > 3.1 ? sign(pressure) : 0;
     if (attentionPush !== 0 && rng() > EVOLUTION_PACE.attentionAdoption) attentionPush = 0;
 
-    const neighborhoodAvg = neighbors[node.id].reduce((sum, ni) => sum + messaged[ni].theoryIndex, 0) / Math.max(1, neighbors[node.id].length);
     const anomalyDrive = node.anomalyMemory > 2.4 && neighborhoodAvg > node.theoryIndex ? 1 : 0;
     const dynamicResistance = (node.lagResistance || 0) * Math.exp(-node.anomalyMemory * 0.35);
     const lagDrag = dynamicResistance > 0.82 && rng() < 0.35 ? -1 : 0;
-    const confusionDrag = (node.confusionMemory || 0) > confusionLimit ? -1 : 0;
-    const netDirection = privatePush + socialPush + attentionPush + anomalyDrive + lagDrag + confusionDrag;
+    const overwhelmed = (node.confusionMemory || 0) > confusionLimit;
+    const netDirection = privatePush + socialPush + attentionPush + anomalyDrive + lagDrag;
     const gapToFrontier = Math.max(0, hiddenIndex - node.theoryIndex);
     const adaptiveStep = clamp(1 + Math.floor(gapToFrontier / 256), 1, 12);
     const stepSize = netDirection === 0 ? 0 : adaptiveStep * COLOR_STEP;
     let nextTheoryIndex = normalizeIndex(node.theoryIndex + sign(netDirection) * stepSize);
-    const confidence = clamp(node.confidence * 0.88 + (netDirection !== 0 ? 0.1 : -0.03) + (Math.abs(hiddenIndex - nextTheoryIndex) < Math.abs(hiddenIndex - node.theoryIndex) ? 0.06 : -0.02), 0.05, 0.99);
+    const confidence = clamp(node.confidence * 0.88 + (netDirection !== 0 ? 0.1 : -0.03) + (Math.abs(hiddenIndex - nextTheoryIndex) < Math.abs(hiddenIndex - node.theoryIndex) ? 0.06 : -0.02) - (overwhelmed ? 0.08 : 0), 0.05, 0.99);
     let anomalyMemory = clamp((node.anomalyMemory || 0) * 0.92 + productive * (0.8 + Math.min(0.4, (node.exposureDepth || 0) * 0.1)), 0, 6);
     let confusionMemory = clamp((node.confusionMemory || 0) * 0.94 + confusion, 0, 6);
     const exposureDepth = clamp((node.exposureDepth || 0) * 0.9 + challengeDifficulty / MAX_THEORY_INDEX, 0, 4);
@@ -846,10 +856,11 @@ function stepWorld(world, options, scenarioId) {
     const lagToMax = currentMaxTheoryIndex - node.theoryIndex;
     const closeToFrontier = lagToMax >= 0 && lagToMax <= frontierLagWindow;
     const frontierContact = neighbors[node.id].some((ni) => messaged[ni].theoryIndex >= currentMaxTheoryIndex - frontierNeighborWindow);
+    const interpretableConfusion = confusionMemory < confusionLimit || (frontierContact && anomalyMemory > breakthroughThreshold * 1.4);
     const canBreakthrough = closeToFrontier
       && anomalyMemory > breakthroughThreshold
       && (node.openness || 0) > 0.4
-      && confusionMemory < confusionLimit
+      && interpretableConfusion
       && frontierContact;
     if (canBreakthrough) {
       nextTheoryIndex = Math.min(MAX_THEORY_INDEX, Math.max(nextTheoryIndex, currentMaxTheoryIndex + Math.floor(PARADIGM_JUMP / 2)));
