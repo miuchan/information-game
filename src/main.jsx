@@ -467,6 +467,7 @@ const PARADIGM_JUMP = 128;
 const CHUNK_SIZE = 32;
 const ANOMALY_GAIN = 42;
 const TIME_SCALES = [1, 4, 16, 64, 256];
+const UI_SYNC_INTERVAL_MS = 180;
 const colorCache = new Map();
 
 function normalizeIndex(value) {
@@ -1450,7 +1451,9 @@ function App() {
   const [hideControls, setHideControls] = useState(false);
   const [scenario, setScenario] = useState('scarce');
   const [dimensions, setDimensions] = useState(() => viewportGrid());
-  const [world, setWorld] = useState(() => createWorld(Date.now(), 'scarce', viewportGrid()));
+  const [worldView, setWorldView] = useState(() => createWorld(Date.now(), 'scarce', viewportGrid()));
+  const worldRef = useRef(worldView);
+  const lastUiSyncRef = useRef(Date.now());
   const [running, setRunning] = useState(false);
   const [speed, setSpeed] = useState(290);
   const [timeScale, setTimeScale] = useState(1);
@@ -1465,10 +1468,10 @@ function App() {
     factCheck: false,
   });
 
-  const metrics = useMemo(() => getMetrics(world), [world]);
-  const selectedNode = selected === null ? null : world.nodes[selected];
+  const metrics = useMemo(() => getMetrics(worldView), [worldView]);
+  const selectedNode = selected === null ? null : worldView.nodes[selected];
   const copy = COPY[locale];
-  const eventText = getEventText(world.event, copy);
+  const eventText = getEventText(worldView.event, copy);
   const controlsToggleTitle = hideControls ? 'Show controls' : 'Hide controls';
   const orderBands = useMemo(() => {
     const groupSize = 4;
@@ -1492,7 +1495,9 @@ function App() {
         const shouldRebuildWorld = widthChanged || heightDelta >= 4;
         if (!shouldRebuildWorld) return;
         setDimensions(next);
-        setWorld(createWorld(Date.now(), scenario, next));
+        const rebuilt = createWorld(Date.now(), scenario, next);
+        worldRef.current = rebuilt;
+        setWorldView(rebuilt);
         setSelected(null);
       }, 180);
     }
@@ -1506,43 +1511,55 @@ function App() {
   useEffect(() => {
     if (!running) return undefined;
     const id = setInterval(() => {
-      setWorld((current) => {
-        let next = current;
-        for (let i = 0; i < timeScale; i += 1) next = stepWorld(next, options, scenario);
-        return next;
-      });
+      let next = worldRef.current;
+      for (let i = 0; i < timeScale; i += 1) next = stepWorld(next, options, scenario);
+      worldRef.current = next;
+      if (Date.now() - lastUiSyncRef.current >= UI_SYNC_INTERVAL_MS) {
+        lastUiSyncRef.current = Date.now();
+        setWorldView(next);
+      }
     }, speed);
     return () => clearInterval(id);
   }, [running, speed, timeScale, options, scenario]);
 
+  useEffect(() => {
+    if (running) return;
+    setWorldView(worldRef.current);
+  }, [running]);
+
   function reset(nextScenario = scenario) {
     setScenario(nextScenario);
-    setWorld(createWorld(Date.now(), nextScenario, dimensions));
+    const nextWorld = createWorld(Date.now(), nextScenario, dimensions);
+    worldRef.current = nextWorld;
+    setWorldView(nextWorld);
     setRunning(false);
     setSelected(null);
     setCamera({ x: 0, y: 0, zoom: 1 });
     setBudget(9);
+    lastUiSyncRef.current = Date.now();
   }
 
   function intervene(kind) {
     const item = INTERVENTIONS[kind];
     if (budget < item.cost) return;
     setBudget((b) => b - item.cost);
-    setWorld((current) => applyIntervention(current, kind, selected));
+    const nextWorld = applyIntervention(worldRef.current, kind, selected);
+    worldRef.current = nextWorld;
+    setWorldView(nextWorld);
   }
 
   function fastForwardToLift(maxTicks = 5000) {
-    setWorld((current) => {
-      let next = current;
-      const initialOrder = orderOf(current.socialFrontierRank ?? current.hiddenIndex);
-      const initialParadigm = current.paradigmShiftCount;
-      for (let i = 0; i < maxTicks; i += 1) {
-        next = stepWorld(next, options, scenario);
-        const nextOrder = orderOf(next.socialFrontierRank ?? next.hiddenIndex);
-        if (next.paradigmShiftCount > initialParadigm || nextOrder > initialOrder) break;
-      }
-      return next;
-    });
+    let next = worldRef.current;
+    const initialOrder = orderOf(next.socialFrontierRank ?? next.hiddenIndex);
+    const initialParadigm = next.paradigmShiftCount;
+    for (let i = 0; i < maxTicks; i += 1) {
+      next = stepWorld(next, options, scenario);
+      const nextOrder = orderOf(next.socialFrontierRank ?? next.hiddenIndex);
+      if (next.paradigmShiftCount > initialParadigm || nextOrder > initialOrder) break;
+    }
+    worldRef.current = next;
+    setWorldView(next);
+    lastUiSyncRef.current = Date.now();
   }
 
   let diagnosticState = 'Learning';
@@ -1554,7 +1571,7 @@ function App() {
 
   return (
     <main className="app-shell">
-      <CellCanvas world={world} selected={selected} onSelect={setSelected} camera={camera} onCameraChange={setCamera} />
+      <CellCanvas world={worldView} selected={selected} onSelect={setSelected} camera={camera} onCameraChange={setCamera} />
       <button
         className="icon-button ui-toggle-button"
         onClick={() => setHideControls((value) => !value)}
@@ -1637,7 +1654,11 @@ function App() {
                 <button className="icon-button primary" onClick={() => setRunning((v) => !v)} type="button" title={running ? copy.meta.pause : copy.meta.run}>
                   {running ? <Pause size={19} /> : <Play size={19} />}
                 </button>
-                <button className="icon-button" onClick={() => setWorld((current) => stepWorld(current, options, scenario))} type="button" title={copy.meta.step}>
+                <button className="icon-button" onClick={() => {
+                  const next = stepWorld(worldRef.current, options, scenario);
+                  worldRef.current = next;
+                  setWorldView(next);
+                }} type="button" title={copy.meta.step}>
                   <FastForward size={18} />
                 </button>
                 <button className="icon-button" onClick={() => fastForwardToLift()} type="button" title="Fast-forward to next lift event">
@@ -1652,11 +1673,11 @@ function App() {
             <div className="truth-strip">
               <div>
                 <Target size={18} />
-                <span>{copy.strip.truth} S^{orderOf(world.hiddenIndex)} · φ{phaseOf(world.hiddenIndex)}</span>
+                <span>{copy.strip.truth} S^{orderOf(worldView.hiddenIndex)} · φ{phaseOf(worldView.hiddenIndex)}</span>
               </div>
               <div>
                 <Activity size={18} />
-                <span>{copy.strip.tick} {world.tick} · H:{orderOf(world.hiddenIndex)} / S:{orderOf(metrics.socialFrontier)} / E:{orderOf(metrics.exposureFrontier)} · {timeScale}× · {diagnosticState}</span>
+                <span>{copy.strip.tick} {worldView.tick} · H:{orderOf(worldView.hiddenIndex)} / S:{orderOf(metrics.socialFrontier)} / E:{orderOf(metrics.exposureFrontier)} · {timeScale}× · {diagnosticState}</span>
               </div>
               <div>
                 <Zap size={18} />
@@ -1694,7 +1715,7 @@ function App() {
             <span>Active speech: {Math.round(metrics.active * 100)}%</span>
             <span>Social p95: S^{metrics.highestStableOrder} / Speculative max: S^{metrics.speculativeOrder}</span>
             <span>Outliers: {Math.round(metrics.outlierRate * 100)}%</span>
-            <span>Paradigm shifts: {world.paradigmShiftCount}</span>
+            <span>Paradigm shifts: {worldView.paradigmShiftCount}</span>
           </div>
           <div className="split-stat">
             <span>Changed cells: {Math.round(metrics.changedCellsRate * 100)}%</span>
