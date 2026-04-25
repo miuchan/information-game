@@ -442,6 +442,17 @@ const actionFromBelief = (belief) => (belief >= 1 ? 1 : belief <= -1 ? 0 : null)
 const idx = (x, y, width) => y * width + x;
 const coord = (i, width) => [i % width, Math.floor(i / width)];
 
+const EVOLUTION_PACE = {
+  privateSignal: 0.58,
+  socialThreshold: 1.28,
+  socialAdoption: 0.62,
+  attentionAdoption: 0.5,
+  revealCadence: 6,
+  revealAudience: 0.6,
+  evidenceLock: 4,
+  weakPushAdoption: 0.55,
+};
+
 function viewportGrid() {
   if (typeof window === 'undefined') return { width: 80, height: 45, cellSize: CELL_SIZE };
   return {
@@ -640,12 +651,13 @@ function stepWorld(world, options, scenarioId) {
     message: generateMessage(node, oldNodes, neighbors, options, rng),
   }));
 
-  const revealTick = (world.tick + 1) % 5 === 0;
+  const revealTick = (world.tick + 1) % EVOLUTION_PACE.revealCadence === 0;
   const truthPush = world.truth === 1 ? 1 : -1;
 
   const nodes = messaged.map((node) => {
     let privatePush = 0;
-    const rate = node.type === 'checker' ? settings.signalRate * 8 : settings.signalRate;
+    const baseRate = node.type === 'checker' ? settings.signalRate * 8 : settings.signalRate;
+    const rate = baseRate * EVOLUTION_PACE.privateSignal;
     const accuracy = node.type === 'checker' ? 0.92 : settings.signalAccuracy;
     if (rng() < rate) {
       const signal = rng() < accuracy ? world.truth : 1 - world.truth;
@@ -653,7 +665,7 @@ function stepWorld(world, options, scenarioId) {
     }
 
     if (options.factCheck && node.checked) privatePush += truthPush;
-    if (options.factCheck && revealTick && (node.checked || rng() < 0.28)) privatePush += truthPush;
+    if (options.factCheck && revealTick && (node.checked || rng() < 0.28 * EVOLUTION_PACE.revealAudience)) privatePush += truthPush;
 
     let evidenceMemory = clamp((node.evidenceMemory || 0) + privatePush, -5, 5);
     if (privatePush === 0 && evidenceMemory !== 0 && rng() < 0.08) evidenceMemory -= sign(evidenceMemory);
@@ -666,16 +678,27 @@ function stepWorld(world, options, scenarioId) {
     if (node.type === 'stubborn') threshold = 2.8;
     if (node.type === 'checker') threshold = 1.9;
     if (node.type === 'bot') threshold = 9;
+    threshold *= EVOLUTION_PACE.socialThreshold;
 
     let socialPush = Math.abs(pressure) >= threshold ? sign(pressure) : 0;
-    if (Math.abs(evidenceMemory) >= 3) {
+    if (socialPush !== 0) {
+      const adoptionChance = Math.min(0.92, EVOLUTION_PACE.socialAdoption + Math.max(0, Math.abs(pressure) - threshold) * 0.08);
+      if (rng() > adoptionChance) socialPush = 0;
+    }
+    if (Math.abs(evidenceMemory) >= EVOLUTION_PACE.evidenceLock) {
       socialPush = 0;
       privatePush = sign(evidenceMemory);
     }
     if (node.type === 'stubborn' && socialPush !== sign(node.belief)) socialPush = 0;
 
-    const attentionPush = options.hotRanking && node.type === 'attention' && Math.abs(pressure) > 2.6 ? sign(pressure) : 0;
-    let nextBelief = clamp(node.belief + privatePush + socialPush + attentionPush, -2, 2);
+    let attentionPush = options.hotRanking && node.type === 'attention' && Math.abs(pressure) > 3.1 ? sign(pressure) : 0;
+    if (attentionPush !== 0 && rng() > EVOLUTION_PACE.attentionAdoption) attentionPush = 0;
+
+    const rawPush = privatePush + socialPush + attentionPush;
+    const effectivePush = Math.abs(rawPush) >= 2
+      ? sign(rawPush)
+      : (Math.abs(rawPush) === 1 && rng() < EVOLUTION_PACE.weakPushAdoption ? sign(rawPush) : 0);
+    let nextBelief = clamp(node.belief + effectivePush, -2, 2);
     if (Math.abs(nextBelief) === 2 && rng() < 0.005) nextBelief -= sign(nextBelief);
 
     if (revealTick && rng() < settings.publicEvidenceRate) {
@@ -1002,7 +1025,7 @@ function App() {
   const [dimensions, setDimensions] = useState(() => viewportGrid());
   const [world, setWorld] = useState(() => createWorld(Date.now(), 'scarce', viewportGrid()));
   const [running, setRunning] = useState(false);
-  const [speed, setSpeed] = useState(180);
+  const [speed, setSpeed] = useState(290);
   const [selected, setSelected] = useState(null);
   const [budget, setBudget] = useState(9);
   const [options, setOptions] = useState({
