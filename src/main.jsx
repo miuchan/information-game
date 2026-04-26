@@ -1508,6 +1508,7 @@ function App() {
       initialWorld: worldRef.current,
       stepWorld,
       getMetrics,
+      backend: 'auto',
     });
     runtimeRef.current = runtime;
     setBackend(runtime.kind);
