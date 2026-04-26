@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import { FaGithub } from 'react-icons/fa';
 import './styles.css';
+import { chooseBackend, SimulationRuntime } from './sim/runtime';
 
 const CELL_SIZE = 18;
 const WORLD_WIDTH = 512;
@@ -1469,7 +1470,10 @@ function App() {
   const [dimensions, setDimensions] = useState(() => viewportGrid());
   const [worldView, setWorldView] = useState(() => createWorld(Date.now(), 'scarce', viewportGrid()));
   const worldRef = useRef(worldView);
+  const runtimeRef = useRef(null);
   const lastUiSyncRef = useRef(Date.now());
+  const [backend, setBackend] = useState('canvas2d');
+  const [actualTimeScale, setActualTimeScale] = useState(0);
   const [running, setRunning] = useState(false);
   const [speed, setSpeed] = useState(290);
   const [timeScale, setTimeScale] = useState(1);
@@ -1500,6 +1504,15 @@ function App() {
   }, [metrics.orderSkyline]);
 
   useEffect(() => {
+    runtimeRef.current = new SimulationRuntime({
+      initialWorld: worldRef.current,
+      stepWorld,
+      getMetrics,
+    });
+    setBackend(chooseBackend());
+  }, []);
+
+  useEffect(() => {
     if (freezeWorldResize) return undefined;
     let resizeTimer = null;
     function handleResize() {
@@ -1513,6 +1526,7 @@ function App() {
         setDimensions(next);
         const rebuilt = createWorld(Date.now(), scenario, next);
         worldRef.current = rebuilt;
+        runtimeRef.current?.setWorld(rebuilt);
         setWorldView(rebuilt);
         setSelected(null);
       }, 180);
@@ -1527,12 +1541,20 @@ function App() {
   useEffect(() => {
     if (!running) return undefined;
     const id = setInterval(() => {
-      let next = worldRef.current;
-      for (let i = 0; i < timeScale; i += 1) next = stepWorld(next, options, scenario);
-      worldRef.current = next;
+      runtimeRef.current?.setControls({
+        timeScale,
+        options,
+        scenario,
+        budgetMs: timeScale >= 64 ? 12 : 6,
+      });
+      const tickResult = runtimeRef.current
+        ? runtimeRef.current.tick()
+        : { world: stepWorld(worldRef.current, options, scenario), actualSteps: 1 };
+      worldRef.current = tickResult.world;
+      setActualTimeScale(tickResult.actualSteps);
       if (Date.now() - lastUiSyncRef.current >= UI_SYNC_INTERVAL_MS) {
         lastUiSyncRef.current = Date.now();
-        setWorldView(next);
+        setWorldView(tickResult.world);
       }
     }, speed);
     return () => clearInterval(id);
@@ -1547,6 +1569,7 @@ function App() {
     setScenario(nextScenario);
     const nextWorld = createWorld(Date.now(), nextScenario, dimensions);
     worldRef.current = nextWorld;
+    runtimeRef.current?.setWorld(nextWorld);
     setWorldView(nextWorld);
     setRunning(false);
     setSelected(null);
@@ -1561,6 +1584,7 @@ function App() {
     setBudget((b) => b - item.cost);
     const nextWorld = applyIntervention(worldRef.current, kind, selected);
     worldRef.current = nextWorld;
+    runtimeRef.current?.setWorld(nextWorld);
     setWorldView(nextWorld);
   }
 
@@ -1574,6 +1598,7 @@ function App() {
       if (next.paradigmShiftCount > initialParadigm || nextOrder > initialOrder) break;
     }
     worldRef.current = next;
+    runtimeRef.current?.setWorld(next);
     setWorldView(next);
     lastUiSyncRef.current = Date.now();
   }
@@ -1673,6 +1698,7 @@ function App() {
                 <button className="icon-button" onClick={() => {
                   const next = stepWorld(worldRef.current, options, scenario);
                   worldRef.current = next;
+                  runtimeRef.current?.setWorld(next);
                   setWorldView(next);
                 }} type="button" title={copy.meta.step}>
                   <FastForward size={18} />
@@ -1693,7 +1719,7 @@ function App() {
               </div>
               <div>
                 <Activity size={18} />
-                <span>{copy.strip.tick} {worldView.tick} · H:{orderOf(worldView.hiddenIndex)} / S:{orderOf(metrics.socialFrontier)} / E:{orderOf(metrics.exposureFrontier)} · C:{orderOf(metrics.validatedCeiling)} · {timeScale}× · {diagnosticState}</span>
+                <span>{copy.strip.tick} {worldView.tick} · H:{orderOf(worldView.hiddenIndex)} / S:{orderOf(metrics.socialFrontier)} / E:{orderOf(metrics.exposureFrontier)} · C:{orderOf(metrics.validatedCeiling)} · {actualTimeScale}/{timeScale}× · {backend} · {diagnosticState}</span>
               </div>
               <div>
                 <Zap size={18} />
