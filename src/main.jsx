@@ -27,8 +27,11 @@ import {
 } from 'lucide-react';
 import { FaGithub } from 'react-icons/fa';
 import './styles.css';
+import { SimulationRuntime } from './sim/runtime';
 
 const CELL_SIZE = 18;
+const WORLD_WIDTH = 512;
+const WORLD_HEIGHT = 512;
 const SCENARIOS = ['scarce', 'polarized', 'anonymous', 'viral', 'bridge', 'market'];
 const LANGUAGES = [
   { code: 'en', label: 'English' },
@@ -101,6 +104,10 @@ const REFERENCES = [
   {
     title: 'Kahneman, D., Slovic, P. & Tversky, A. (1982). Judgment under Uncertainty',
     url: 'https://books.google.com/books/about/Judgment_Under_Uncertainty.html?id=_0H8gwj4a1MC',
+  },
+  {
+    title: 'Kuhn, T. S. (1962). The Structure of Scientific Revolutions',
+    url: 'https://press.uchicago.edu/ucp/books/book/chicago/S/bo13179781.html',
   },
 ];
 
@@ -438,27 +445,177 @@ function makeRng(seed) {
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const sign = (value) => (value > 0 ? 1 : value < 0 ? -1 : 0);
-const actionFromBelief = (belief) => (belief >= 1 ? 1 : belief <= -1 ? 0 : null);
 const idx = (x, y, width) => y * width + x;
 const coord = (i, width) => [i % width, Math.floor(i / width)];
 
 const EVOLUTION_PACE = {
-  privateSignal: 0.58,
-  socialThreshold: 1.28,
-  socialAdoption: 0.62,
-  attentionAdoption: 0.5,
-  revealCadence: 6,
-  revealAudience: 0.6,
+  privateSignal: 0.46,
+  socialThreshold: 1.1,
+  socialAdoption: 0.65,
+  attentionAdoption: 0.56,
+  revealCadence: 5,
+  revealAudience: 0.58,
   evidenceLock: 4,
-  weakPushAdoption: 0.55,
+  weakPushAdoption: 0.6,
 };
 
+const PHASES = 8192;
+const ORDERS = 128;
+const MAX_THEORY_INDEX = PHASES * ORDERS - 1;
+const COLOR_STEP = 1;
+const VISUAL_BANDS = 256;
+const PARADIGM_JUMP = 128;
+const CHUNK_SIZE = 32;
+const ANOMALY_GAIN = 42;
+const TIME_SCALES = [1, 4, 16, 64, 256];
+const UI_SYNC_INTERVAL_MS = 180;
+const SPECULATION_WINDOW = Math.floor(PHASES * 0.75);
+const colorCache = new Map();
+
+function normalizeIndex(value) {
+  return clamp(Math.round(value), 0, MAX_THEORY_INDEX);
+}
+
+function phaseOf(rank) {
+  return normalizeIndex(rank) % PHASES;
+}
+
+function orderOf(rank) {
+  return Math.floor(normalizeIndex(rank) / PHASES);
+}
+
+function makeRank(order, phase) {
+  return normalizeIndex(order * PHASES + phase);
+}
+
+function indexToColor(value) {
+  const index = normalizeIndex(value);
+  if (colorCache.has(index)) return colorCache.get(index);
+  const s = phaseOf(index) / (PHASES - 1);
+  const lightness = 0.30 + 0.62 * Math.pow(s, 0.85);
+  const chroma = 0.07 + 0.13 * (Math.sin(Math.PI * s) ** 2);
+  const hueDeg = (260 + 360 * 7 * s) % 360;
+  const hueRad = (hueDeg * Math.PI) / 180;
+  const a = chroma * Math.cos(hueRad);
+  const b = chroma * Math.sin(hueRad);
+
+  const l = lightness + 0.3963377774 * a + 0.2158037573 * b;
+  const m = lightness - 0.1055613458 * a - 0.0638541728 * b;
+  const sLinear = lightness - 0.0894841775 * a - 1.291485548 * b;
+
+  const l3 = l ** 3;
+  const m3 = m ** 3;
+  const s3 = sLinear ** 3;
+
+  const linearR = +4.0767416621 * l3 - 3.3077115913 * m3 + 0.2309699292 * s3;
+  const linearG = -1.2684380046 * l3 + 2.6097574011 * m3 - 0.3413193965 * s3;
+  const linearB = -0.0041960863 * l3 - 0.7034186147 * m3 + 1.707614701 * s3;
+
+  const toSrgb = (linear) => {
+    const clamped = clamp(linear, 0, 1);
+    if (clamped <= 0.0031308) return clamped * 12.92;
+    return 1.055 * (clamped ** (1 / 2.4)) - 0.055;
+  };
+  const r = Math.round(toSrgb(linearR) * 255);
+  const g = Math.round(toSrgb(linearG) * 255);
+  const blue = Math.round(toSrgb(linearB) * 255);
+  const color = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${blue.toString(16).padStart(2, '0')}`;
+  colorCache.set(index, color);
+  return color;
+}
+
+function indexDepth(value) {
+  return normalizeIndex(value) / MAX_THEORY_INDEX;
+}
+
+function visualIndex(theoryIndex) {
+  const band = Math.floor((normalizeIndex(theoryIndex) / MAX_THEORY_INDEX) * (VISUAL_BANDS - 1));
+  return Math.round((band / (VISUAL_BANDS - 1)) * MAX_THEORY_INDEX);
+}
+
+function hash2(x, y, seed = 0) {
+  const value = Math.sin(x * 127.1 + y * 311.7 + seed * 74.7) * 43758.5453;
+  return value - Math.floor(value);
+}
+
+function smoothNoise(x, y, seed) {
+  const ix = Math.floor(x);
+  const iy = Math.floor(y);
+  const fx = x - ix;
+  const fy = y - iy;
+  const u = fx * fx * (3 - 2 * fx);
+  const v = fy * fy * (3 - 2 * fy);
+  const a = hash2(ix, iy, seed);
+  const b = hash2(ix + 1, iy, seed);
+  const c = hash2(ix, iy + 1, seed);
+  const d = hash2(ix + 1, iy + 1, seed);
+  const x1 = a * (1 - u) + b * u;
+  const x2 = c * (1 - u) + d * u;
+  return x1 * (1 - v) + x2 * v;
+}
+
+function stressAt(x, y, world) {
+  const drift = world.tick * 0.012;
+  const large = smoothNoise(x * 0.055 + drift, y * 0.055 - drift, world.seed);
+  const medium = smoothNoise(x * 0.13 - drift * 1.7, y * 0.13 + drift * 1.1, world.seed + 17);
+  const fine = smoothNoise(x * 0.31 + drift * 2.3, y * 0.31 - drift * 1.9, world.seed + 41);
+  const field = large * 0.55 + medium * 0.3 + fine * 0.15;
+  return clamp(field * 0.72 + world.frontierPressure * 0.18 + world.domainRadius * 0.1, 0, 1);
+}
+
+function theoryError(theoryIndex, contextStress, precision, hiddenIndex) {
+  const depth = indexDepth(theoryIndex);
+  const hiddenDepth = indexDepth(hiddenIndex);
+  const mismatch = Math.max(0, hiddenDepth - depth);
+  const scope = 0.22 + 0.78 * Math.pow(depth, 0.8);
+  const frontierPenalty = Math.max(0, contextStress - scope);
+  const precisionPenalty = precision * mismatch * 0.7;
+  const underfit = mismatch * 1.12 + frontierPenalty * (1.05 + mismatch * 0.35);
+  return underfit + precisionPenalty;
+}
+
+function productiveAnomaly(gap) {
+  if (gap <= 0) return 0;
+  const idealGap = PARADIGM_JUMP * 0.8;
+  const width = PARADIGM_JUMP * 2.5;
+  return Math.exp(-((gap - idealGap) ** 2) / (2 * width ** 2));
+}
+
+function confusionPressure(gap) {
+  if (gap <= 0) return 0;
+  const productive = productiveAnomaly(gap);
+  return Math.min(1, gap / 512) * (1 - productive);
+}
+
+function percentile(values, p) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor((sorted.length - 1) * clamp(p, 0, 1))];
+}
+
+function chunkMeta(world) {
+  const chunkCols = Math.ceil(world.width / CHUNK_SIZE);
+  const chunkRows = Math.ceil(world.height / CHUNK_SIZE);
+  return { chunkCols, chunkRows };
+}
+
+function chunkIndexFor(x, y, world) {
+  const { chunkCols } = chunkMeta(world);
+  const cx = Math.floor(x / CHUNK_SIZE);
+  const cy = Math.floor(y / CHUNK_SIZE);
+  return cy * chunkCols + cx;
+}
+
+function cognitiveCeilingFromExposure(exposureFrontierRank) {
+  return Math.min(MAX_THEORY_INDEX, normalizeIndex(exposureFrontierRank + SPECULATION_WINDOW));
+}
+
 function viewportGrid() {
-  if (typeof window === 'undefined') return { width: 80, height: 45, cellSize: CELL_SIZE };
+  if (typeof window === 'undefined') return { width: WORLD_WIDTH, height: WORLD_HEIGHT, cellSize: 10 };
   return {
-    width: Math.max(24, Math.ceil(window.innerWidth / CELL_SIZE)),
-    height: Math.max(18, Math.ceil(window.innerHeight / CELL_SIZE)),
-    cellSize: CELL_SIZE,
+    width: WORLD_WIDTH,
+    height: WORLD_HEIGHT,
+    cellSize: 10,
   };
 }
 
@@ -510,41 +667,60 @@ function buildNeighbors(rng, width, height, crossCommunity = true) {
 
 function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = viewportGrid()) {
   const rng = makeRng(seed);
-  const truth = rng() > 0.5 ? 1 : 0;
   const settings = scenarioSettings(scenarioId);
   const nodes = [];
   const { width, height, cellSize } = dimensions;
   const scenarioBias = {
     scarce: 0,
-    polarized: 1,
+    polarized: 0,
     anonymous: 0,
     viral: 0,
-    bridge: -1,
+    bridge: 0,
     market: 0,
   }[scenarioId];
+  const hiddenIndex = normalizeIndex(
+    {
+      scarce: makeRank(0, 2400),
+      polarized: makeRank(0, 3200),
+      anonymous: makeRank(0, 3600),
+      viral: makeRank(0, 4100),
+      bridge: makeRank(1, 900),
+      market: makeRank(1, 1600),
+    }[scenarioId] + Math.floor(rng() * 320),
+  );
+  const { chunkCols, chunkRows } = chunkMeta({ width, height });
+  const chunkBiasRank = new Float32Array(chunkCols * chunkRows);
+  for (let cy = 0; cy < chunkRows; cy += 1) {
+    for (let cx = 0; cx < chunkCols; cx += 1) {
+      const i = cy * chunkCols + cx;
+      chunkBiasRank[i] = clamp(hiddenIndex + (rng() - 0.5) * PHASES * 0.35, 0, MAX_THEORY_INDEX);
+    }
+  }
 
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const community = communityOf(x, y, width, height);
-      const localBias = scenarioId === 'polarized' || scenarioId === 'bridge'
-        ? (community % 2 === 0 ? -1 : 1)
-        : scenarioBias;
+      const localNoise = (rng() - 0.5) * 0.32;
+      const localBias = scenarioId === 'polarized'
+        ? scenarioBias + localNoise + (rng() < 0.5 ? -0.3 : 0.3)
+        : scenarioBias + localNoise;
       const roll = rng();
       const type = roll < 0.22 ? 'truth' : roll < 0.58 ? 'social' : roll < 0.82 ? 'attention' : 'stubborn';
-      const privateSignal = rng() < settings.initialSignalRate
-        ? (rng() < settings.initialSignalAccuracy ? truth : 1 - truth)
-        : null;
-      const signalPush = privateSignal === null ? 0 : privateSignal === 1 ? 1 : -1;
-      const belief = clamp(localBias + signalPush + (rng() < 0.12 ? (rng() > 0.5 ? 1 : -1) : 0), -2, 2);
+      const startIndex = normalizeIndex(
+        hiddenIndex
+        - Math.floor((0.06 + Math.max(0, -localBias) * 0.11) * MAX_THEORY_INDEX)
+        + (rng() < settings.initialSignalRate ? Math.floor((rng() < settings.initialSignalAccuracy ? 1 : -1) * MAX_THEORY_INDEX * 0.01) : 0),
+      );
       nodes.push({
         id: idx(x, y, width),
         x,
         y,
         community,
-        belief,
-        prevBelief: belief,
-        message: belief > 0 ? 1 : belief < 0 ? -1 : 0,
-        action: actionFromBelief(belief),
+        theoryIndex: startIndex,
+        prevTheoryIndex: startIndex,
+        confidence: clamp(0.45 + rng() * 0.35, 0.2, 0.95),
+        message: 0,
+        action: startIndex,
         reputation: Math.floor(1 + rng() * 4),
         type,
         filter: Math.floor(rng() * 4),
@@ -552,26 +728,30 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
         lastFlip: 0,
         attention: 0,
         checked: false,
-        evidenceMemory: 0,
+        lagResistance: rng(),
+        openness: clamp(0.25 + rng() * 0.65, 0, 1),
+        confusionMemory: 0,
+        productiveSignal: 0,
+        translation: 0,
+        exposureDepth: 0,
+        anomalyMemory: rng() * 0.4,
         accuracyStreak: 0,
       });
     }
   }
 
   if (scenarioId === 'bridge') {
-    const cx = Math.floor(width / 2);
-    const y0 = Math.max(0, Math.floor(height * 0.38));
-    const y1 = Math.min(height, Math.floor(height * 0.62));
-    for (let y = y0; y < y1; y += 1) {
-      [cx - 1, cx, cx + 1].forEach((x) => {
-        if (x < 0 || x >= width) return;
-        const node = nodes[idx(x, y, width)];
-        node.belief = truth === 1 ? -2 : 2;
-        node.message = truth === 1 ? -1 : 1;
-        node.action = actionFromBelief(node.belief);
-        node.type = 'attention';
-        node.reputation = 5;
-      });
+    const seededCount = Math.max(20, Math.round(nodes.length * 0.015));
+    for (let k = 0; k < seededCount; k += 1) {
+      const node = nodes[Math.floor(rng() * nodes.length)];
+      if (!node) continue;
+      node.theoryIndex = normalizeIndex(node.theoryIndex - 480);
+      node.prevTheoryIndex = node.theoryIndex;
+      node.confidence = clamp(node.confidence + 0.12, 0, 0.95);
+      node.message = -1;
+      node.action = node.theoryIndex;
+      node.type = 'attention';
+      node.reputation = Math.max(node.reputation, 5);
     }
   }
 
@@ -581,7 +761,13 @@ function createWorld(seed = Date.now(), scenarioId = 'scarce', dimensions = view
     width,
     height,
     cellSize,
-    truth,
+    hiddenIndex,
+    frontier: hiddenIndex,
+    domainRadius: 0.28,
+    precision: 0.2,
+    frontierPressure: scenarioId === 'bridge' ? 0.22 : 0.12,
+    paradigmShiftCount: 0,
+    chunkBiasRank,
     tick: 0,
     nodes,
     neighbors: buildNeighbors(rng, width, height, true),
@@ -601,21 +787,19 @@ function scenarioSettings(id) {
 }
 
 function generateMessage(node, oldNodes, neighbors, options, rng) {
-  if (node.type === 'checker') return node.belief === 0 ? 0 : sign(node.belief);
-  if (node.type === 'bot') return node.message || 1;
-  const local = neighbors[node.id].reduce((sum, ni) => sum + oldNodes[ni].message, 0);
+  if (node.type === 'bot') return -1;
+  if ((node.confusionMemory || 0) > 2.6 && node.type !== 'agitator' && rng() < 0.55) return 0;
+  const localIndex = neighbors[node.id].reduce((sum, ni) => sum + oldNodes[ni].theoryIndex, 0) / Math.max(1, neighbors[node.id].length);
+  const delta = localIndex - node.theoryIndex;
   let msg = 0;
-  if (node.type === 'truth') {
-    msg = Math.abs(node.belief) >= 2 ? sign(node.belief) : 0;
-  } else if (node.type === 'social') {
-    msg = Math.abs(local) >= 2 ? sign(local) : sign(node.belief);
-  } else if (node.type === 'attention') {
-    msg = Math.abs(node.belief) >= 1 ? sign(node.belief) : (local === 0 ? 0 : sign(local));
-    if (options.hotRanking && rng() < 0.18) msg = local >= 0 ? 1 : -1;
-  } else if (node.type === 'stubborn') {
-    msg = Math.abs(node.belief) >= 1 && rng() > 0.35 ? sign(node.belief) : 0;
-  } else if (node.type === 'agitator') {
-    msg = node.belief >= 0 ? 1 : -1;
+  if (node.type === 'checker' || node.type === 'truth') msg = node.anomalyMemory > 1.3 ? 1 : 0;
+  else if (node.type === 'social') msg = Math.abs(delta) > MAX_THEORY_INDEX * 0.015 ? sign(delta) : 0;
+  else if (node.type === 'attention') msg = Math.abs(delta) > MAX_THEORY_INDEX * 0.01 ? sign(delta) : (rng() < 0.18 ? 1 : 0);
+  else if (node.type === 'stubborn') msg = node.anomalyMemory > 2.8 ? 1 : 0;
+  else if (node.type === 'agitator') msg = rng() < 0.75 ? -1 : 1;
+  if (options.hotRanking && node.type === 'attention' && rng() < 0.22) msg = rng() < 0.8 ? 1 : -1;
+  if (msg === 0 && node.energy > 0 && node.anomalyMemory > 2.1 && rng() < 0.08) {
+    msg = delta === 0 ? (rng() < 0.5 ? 1 : -1) : sign(delta);
   }
   if (node.energy <= 0 && node.type !== 'checker') return 0;
   return msg;
@@ -634,7 +818,7 @@ function pressureFor(node, oldNodes, neighbors, options) {
     if (node.filter === 2 && Math.abs(other.message) > 0) weight += 0.25;
     if (node.filter === 3 && other.community !== node.community) weight *= 0.72;
     if (options.anonymous) weight = 1 + (options.hotRanking ? Math.min(1.4, other.attention * 0.15) : 0);
-    const evidenceBacked = Math.abs(other.evidenceMemory || 0) >= 3 && sign(other.evidenceMemory || 0) === other.message;
+    const evidenceBacked = (other.anomalyMemory || 0) >= 1.9 && other.message > 0;
     if (evidenceBacked) weight += 0.9;
     pressure += weight * other.message;
     heard += 1;
@@ -654,28 +838,55 @@ function stepWorld(world, options, scenarioId) {
 
   const messaged = oldNodes.map((node) => ({
     ...node,
-    prevBelief: node.belief,
+    prevTheoryIndex: node.theoryIndex,
     message: generateMessage(node, oldNodes, neighbors, options, rng),
   }));
 
   const revealTick = (world.tick + 1) % EVOLUTION_PACE.revealCadence === 0;
-  const truthPush = world.truth === 1 ? 1 : -1;
+  const hiddenIndex = world.hiddenIndex;
+  const frontier = world.frontier ?? hiddenIndex;
+  const currentMaxTheoryIndex = oldNodes.reduce((max, node) => Math.max(max, node.theoryIndex), 0);
+  const socialFrontier = percentile(oldNodes.map((node) => node.theoryIndex), 0.95);
+  const exposureFrontier = Math.min(frontier, socialFrontier + PARADIGM_JUMP * 2);
+  const cognitiveCeiling = cognitiveCeilingFromExposure(exposureFrontier);
+  const { chunkCols, chunkRows } = chunkMeta(world);
+  const chunkBiasRank = new Float32Array(world.chunkBiasRank || chunkCols * chunkRows);
+  for (let cy = 0; cy < chunkRows; cy += 1) {
+    for (let cx = 0; cx < chunkCols; cx += 1) {
+      const ci = cy * chunkCols + cx;
+      const chunkNoise = (hash2(cx, cy, Math.floor(world.tick * 0.02) + world.seed) - 0.5) * PHASES * 0.35;
+      const target = exposureFrontier + chunkNoise;
+      chunkBiasRank[ci] = clamp(chunkBiasRank[ci] * 0.96 + target * 0.04, 0, MAX_THEORY_INDEX);
+    }
+  }
+  const frontierLagWindow = 220;
+  const frontierNeighborWindow = 180;
+  const breakthroughThreshold = 1.15;
+  const confusionLimit = 1.6;
+  const anomalyWave = new Float32Array(messaged.length);
+  const translationWave = new Float32Array(messaged.length);
+  const confidenceWave = new Float32Array(messaged.length);
 
   const nodes = messaged.map((node) => {
+    const contextStress = stressAt(node.x, node.y, world);
     let privatePush = 0;
     const baseRate = node.type === 'checker' ? settings.signalRate * 8 : settings.signalRate;
     const rate = baseRate * EVOLUTION_PACE.privateSignal;
-    const accuracy = node.type === 'checker' ? 0.92 : settings.signalAccuracy;
-    if (rng() < rate) {
-      const signal = rng() < accuracy ? world.truth : 1 - world.truth;
-      privatePush = signal === 1 ? 1 : -1;
-    }
-
-    if (options.factCheck && node.checked) privatePush += truthPush;
-    if (options.factCheck && revealTick && (node.checked || rng() < 0.28 * EVOLUTION_PACE.revealAudience)) privatePush += truthPush;
-
-    let evidenceMemory = clamp((node.evidenceMemory || 0) + privatePush, -5, 5);
-    if (privatePush === 0 && evidenceMemory !== 0 && rng() < 0.08) evidenceMemory -= sign(evidenceMemory);
+    const frontierMix = clamp(0.1 + world.frontierPressure * 0.32, 0.08, 0.45);
+    const frontierBand = Math.max(8, Math.floor(PHASES * 0.18));
+    const chunkBias = chunkBiasRank[chunkIndexFor(node.x, node.y, world)] ?? exposureFrontier;
+    const localTarget = 0.65 * chunkBias + 0.35 * exposureFrontier;
+    const challengeDifficulty = rng() < frontierMix
+      ? normalizeIndex(localTarget + (rng() - 0.5) * frontierBand)
+      : Math.floor(rng() * Math.max(1, localTarget));
+    const neighborhoodAvg = neighbors[node.id].reduce((sum, ni) => sum + messaged[ni].theoryIndex, 0) / Math.max(1, neighbors[node.id].length);
+    const challengeGap = challengeDifficulty - node.theoryIndex;
+    const rawGap = Math.max(0, challengeGap);
+    const intelligibleGap = challengeDifficulty - Math.max(node.theoryIndex, neighborhoodAvg - PARADIGM_JUMP);
+    const productive = productiveAnomaly(Math.max(0, intelligibleGap));
+    const confusion = confusionPressure(rawGap);
+    const modelError = theoryError(node.theoryIndex, contextStress, world.precision, hiddenIndex) + productive * 0.55;
+    if (rng() < rate && rng() < settings.signalAccuracy) privatePush = productive > 0.18 ? sign(challengeGap) : 0;
 
     const pressure = pressureFor(node, messaged, neighbors, options);
     let threshold = 1.2;
@@ -692,47 +903,105 @@ function stepWorld(world, options, scenarioId) {
       const adoptionChance = Math.min(0.92, EVOLUTION_PACE.socialAdoption + Math.max(0, Math.abs(pressure) - threshold) * 0.08);
       if (rng() > adoptionChance) socialPush = 0;
     }
-    if (Math.abs(evidenceMemory) >= EVOLUTION_PACE.evidenceLock) {
-      socialPush = 0;
-      privatePush = sign(evidenceMemory);
-    }
-    if (node.type === 'stubborn' && socialPush !== sign(node.belief)) socialPush = 0;
+    if (node.type === 'stubborn' && socialPush < 0) socialPush = 0;
 
     let attentionPush = options.hotRanking && node.type === 'attention' && Math.abs(pressure) > 3.1 ? sign(pressure) : 0;
     if (attentionPush !== 0 && rng() > EVOLUTION_PACE.attentionAdoption) attentionPush = 0;
 
-    const rawPush = privatePush + socialPush + attentionPush;
-    const effectivePush = Math.abs(rawPush) >= 2
-      ? sign(rawPush)
-      : (Math.abs(rawPush) === 1 && rng() < EVOLUTION_PACE.weakPushAdoption ? sign(rawPush) : 0);
-    let nextBelief = clamp(node.belief + effectivePush, -2, 2);
-    if (Math.abs(nextBelief) === 2 && rng() < 0.005) nextBelief -= sign(nextBelief);
+    const anomalyDrive = node.anomalyMemory > 2.4 && neighborhoodAvg > node.theoryIndex ? 1 : 0;
+    const dynamicResistance = (node.lagResistance || 0) * Math.exp(-node.anomalyMemory * 0.35);
+    const lagDrag = dynamicResistance > 0.82 && rng() < 0.35 ? -1 : 0;
+    const overwhelmed = (node.confusionMemory || 0) > confusionLimit;
+    const netDirection = privatePush + socialPush + attentionPush + anomalyDrive + lagDrag;
+    const gapToFrontier = Math.max(0, hiddenIndex - node.theoryIndex);
+    const adaptiveStep = clamp(1 + Math.floor(gapToFrontier / 256), 1, 12);
+    const stepSize = netDirection === 0 ? 0 : adaptiveStep * COLOR_STEP;
+    let nextTheoryIndex = normalizeIndex(node.theoryIndex + sign(netDirection) * stepSize);
+    const confidence = clamp(node.confidence * 0.88 + (netDirection !== 0 ? 0.1 : -0.03) + (Math.abs(hiddenIndex - nextTheoryIndex) < Math.abs(hiddenIndex - node.theoryIndex) ? 0.06 : -0.02) - (overwhelmed ? 0.08 : 0), 0.05, 0.99);
+    let anomalyMemory = clamp((node.anomalyMemory || 0) * 0.92 + productive * ANOMALY_GAIN * 0.02 * (0.8 + Math.min(0.4, (node.exposureDepth || 0) * 0.1)), 0, 6);
+    let confusionMemory = clamp((node.confusionMemory || 0) * 0.94 + confusion, 0, 6);
+    let translation = clamp((node.translation || 0) * 0.9, 0, 6);
+    const exposureDepth = clamp((node.exposureDepth || 0) * 0.9 + challengeDifficulty / MAX_THEORY_INDEX, 0, 4);
 
-    if (revealTick && rng() < settings.publicEvidenceRate) {
-      evidenceMemory = clamp(evidenceMemory + truthPush, -5, 5);
-      if (node.type === 'truth' || node.type === 'checker') nextBelief = clamp(nextBelief + truthPush, -2, 2);
+    const lagToMax = currentMaxTheoryIndex - node.theoryIndex;
+    const closeToFrontier = lagToMax >= 0 && lagToMax <= frontierLagWindow;
+    const frontierContact = neighbors[node.id].some((ni) => messaged[ni].theoryIndex >= currentMaxTheoryIndex - frontierNeighborWindow);
+    if ((confusionMemory > 1.0 || anomalyMemory > 1.4 || currentMaxTheoryIndex - node.theoryIndex > 96) && frontierContact) {
+      let bestScore = -Infinity;
+      neighbors[node.id].forEach((ni) => {
+        const other = messaged[ni];
+        const distance = other.theoryIndex - node.theoryIndex;
+        if (distance <= 24 || distance > PHASES * 0.9) return;
+        const score = (other.reputation || 0) * 0.35 + (other.translation || 0) * 0.45 + (other.confidence || 0) * 0.2;
+        if (score > bestScore) bestScore = score;
+      });
+      if (bestScore > 0) {
+        const effectiveness = clamp(bestScore / 8, 0.2, 1);
+        confusionMemory = clamp(confusionMemory * (0.88 - 0.2 * effectiveness), 0, 6);
+        anomalyMemory = clamp(anomalyMemory + 0.2 + 0.45 * effectiveness, 0, 6);
+        translation = clamp(translation + 0.28 + 0.4 * effectiveness, 0, 6);
+      }
     }
+    const interpretableConfusion = confusionMemory < confusionLimit || (frontierContact && anomalyMemory > breakthroughThreshold * 1.4);
+    const canBreakthrough = closeToFrontier
+      && anomalyMemory > (breakthroughThreshold * 0.8)
+      && (node.openness || 0) > 0.34
+      && interpretableConfusion
+      && frontierContact;
+    if (canBreakthrough) {
+      nextTheoryIndex = Math.min(MAX_THEORY_INDEX, Math.max(nextTheoryIndex, currentMaxTheoryIndex + Math.floor(PARADIGM_JUMP / 2)));
+      anomalyMemory *= 0.25;
+      confusionMemory *= 0.5;
+      translation = clamp(translation + 0.8, 0, 6);
+      neighbors[node.id].forEach((ni) => {
+        if (messaged[ni].theoryIndex >= nextTheoryIndex) return;
+        anomalyWave[ni] += 0.2;
+        translationWave[ni] += 0.14;
+        confidenceWave[ni] += 0.05;
+      });
+    }
+    if (revealTick && (node.checked || rng() < settings.publicEvidenceRate * EVOLUTION_PACE.revealAudience)) anomalyMemory = clamp(anomalyMemory + 0.45, 0, 6);
 
-    const nextAction = actionFromBelief(nextBelief);
+    const microLearnGain = Math.floor(productive * 12)
+      + (anomalyMemory > 1.7 ? 2 : 0)
+      + (anomalyMemory > 2.5 ? 4 : 0)
+      + (translation > 1 ? 2 : 0);
+    if (microLearnGain > 0) nextTheoryIndex = normalizeIndex(nextTheoryIndex + microLearnGain);
+    nextTheoryIndex = Math.min(nextTheoryIndex, cognitiveCeiling);
+
+    const nextAction = nextTheoryIndex;
     const spent = node.message === 0 ? 0 : node.type === 'attention' || node.type === 'agitator' ? 2 : 1;
     const attention = Math.max(0, Math.round(Math.abs(pressure) + (node.message !== 0 ? 1 : 0)));
+    const passiveRecovery = node.message === 0 ? 1 : 0;
     return {
       ...node,
-      belief: nextBelief,
+      theoryIndex: nextTheoryIndex,
+      confidence,
       action: nextAction,
-      lastFlip: sign(nextBelief) !== sign(node.prevBelief) ? world.tick + 1 : node.lastFlip,
-      energy: clamp(node.energy - spent + (attention >= 3 ? 1 : 0), 0, 9),
+      lastFlip: nextTheoryIndex !== node.prevTheoryIndex ? world.tick + 1 : node.lastFlip,
+      energy: clamp(node.energy - spent + passiveRecovery + (attention >= 3 ? 1 : 0), 0, 9),
       attention,
-      evidenceMemory,
+      anomalyMemory,
+      confusionMemory,
+      productiveSignal: productive,
+      translation,
+      exposureDepth,
     };
+  });
+
+  nodes.forEach((node, i) => {
+    if (anomalyWave[i] > 0) node.anomalyMemory = clamp(node.anomalyMemory + anomalyWave[i], 0, 6);
+    if (translationWave[i] > 0) node.translation = clamp((node.translation || 0) + translationWave[i], 0, 6);
+    if (confidenceWave[i] > 0) node.confidence = clamp(node.confidence + confidenceWave[i], 0.05, 0.99);
   });
 
   if (revealTick) {
     let rewarded = 0;
     let punished = 0;
     nodes.forEach((node) => {
-      const saidTruth = node.message !== 0 && (node.message === 1) === (world.truth === 1);
-      const saidFalse = node.message !== 0 && !saidTruth;
+      const nearTruth = Math.abs(node.theoryIndex - hiddenIndex) <= MAX_THEORY_INDEX * 0.015;
+      const saidTruth = node.message > 0 && nearTruth;
+      const saidFalse = node.message > 0 && !nearTruth;
       if (saidTruth) {
         node.reputation = clamp(node.reputation + 1, 0, 9);
         node.energy = clamp(node.energy + 1, 0, 9);
@@ -751,16 +1020,35 @@ function stepWorld(world, options, scenarioId) {
         if (node.type === 'attention') node.type = 'truth';
         node.checked = true;
       }
-      if (node.belief !== node.prevBelief && Math.abs(node.belief - node.prevBelief) >= 2) {
+      if (node.theoryIndex !== node.prevTheoryIndex && Math.abs(node.theoryIndex - node.prevTheoryIndex) >= 4000) {
         node.reputation = clamp(node.reputation - 1, 0, 9);
       }
     });
     event = { key: 'reveal', data: { rewarded, punished } };
   }
 
+  const avgAnomaly = nodes.reduce((sum, node) => sum + node.anomalyMemory, 0) / Math.max(1, nodes.length);
+  let nextFrontier = clamp(frontier + 0.18, 0, MAX_THEORY_INDEX);
+  let paradigmShiftCount = world.paradigmShiftCount;
+  if (avgAnomaly > 2.45 && frontier < MAX_THEORY_INDEX && (world.tick + 1) % 8 === 0) {
+    nextFrontier = clamp(nextFrontier + PARADIGM_JUMP, 0, MAX_THEORY_INDEX);
+    paradigmShiftCount += 1;
+    event = { key: 'bridge' };
+  }
+  const nextHiddenIndex = normalizeIndex(nextFrontier);
+
   return {
     ...world,
     tick: world.tick + 1,
+    hiddenIndex: nextHiddenIndex,
+    frontier: nextFrontier,
+    socialFrontierRank: socialFrontier,
+    exposureFrontierRank: exposureFrontier,
+    chunkBiasRank,
+    paradigmShiftCount,
+    domainRadius: clamp(world.domainRadius + 0.0025, 0, 1),
+    precision: clamp(world.precision + 0.002, 0, 1),
+    frontierPressure: clamp(world.frontierPressure + 0.0015 + (world.tick % 120 === 0 ? 0.04 : 0), 0.08, 1),
     nodes,
     event: event || world.event,
   };
@@ -768,20 +1056,68 @@ function stepWorld(world, options, scenarioId) {
 
 function getMetrics(world) {
   const total = world.nodes.length || 1;
-  const acted = world.nodes.filter((n) => n.action !== null);
-  const truthAligned = acted.length ? acted.filter((n) => n.action === world.truth).length / acted.length : 0;
+  const predictionAccuracy = 1 - world.nodes.reduce((sum, node) => (
+    sum + theoryError(node.theoryIndex, stressAt(node.x, node.y, world), world.precision, world.hiddenIndex)
+  ), 0) / total;
   const active = world.nodes.filter((n) => n.message !== 0).length / total;
   const avgRep = world.nodes.reduce((sum, n) => sum + n.reputation, 0) / total;
   const communityMeans = [0, 1, 2, 3].map((c) => {
     const list = world.nodes.filter((n) => n.community === c);
-    return list.length ? list.reduce((sum, n) => sum + n.belief, 0) / list.length : 0;
+    return list.length ? list.reduce((sum, n) => sum + n.theoryIndex, 0) / list.length : 0;
   });
   const globalMean = communityMeans.reduce((sum, v) => sum + v, 0) / 4;
-  const polarization = communityMeans.reduce((sum, v) => sum + (v - globalMean) ** 2, 0) / 4 / 4;
-  const positive = world.nodes.filter((n) => n.belief > 0).length / total;
-  const negative = world.nodes.filter((n) => n.belief < 0).length / total;
-  const undecided = world.nodes.filter((n) => n.action === null).length / total;
-  return { truthAligned, active, avgRep, polarization, positive, negative, undecided };
+  const polarization = communityMeans.reduce((sum, v) => sum + (v - globalMean) ** 2, 0) / 4 / (MAX_THEORY_INDEX ** 2);
+  const scope = world.nodes.reduce((sum, n) => sum + (0.22 + 0.78 * Math.pow(indexDepth(n.theoryIndex), 0.8)), 0) / total;
+  const depth = world.nodes.reduce((sum, n) => sum + indexDepth(n.theoryIndex), 0) / total;
+  const meanIndex = world.nodes.reduce((sum, n) => sum + n.theoryIndex, 0) / total;
+  const anomaly = world.nodes.reduce((sum, n) => sum + n.anomalyMemory, 0) / total / 4;
+  const confusionLoad = world.nodes.reduce((sum, n) => sum + (n.confusionMemory || 0), 0) / total / 6;
+  const translationRate = world.nodes.reduce((sum, n) => sum + (n.translation || 0), 0) / total / 6;
+  const deltas = world.nodes.map((n) => Math.abs(n.theoryIndex - n.prevTheoryIndex));
+  const changed = deltas.filter((value) => value > 0);
+  const changedCellsRate = changed.length / total;
+  const avgDeltaPerChanged = changed.length ? changed.reduce((sum, value) => sum + value, 0) / changed.length : 0;
+  const learningVelocity = clamp(changedCellsRate * (avgDeltaPerChanged / Math.max(1, PARADIGM_JUMP * 1.5)), 0, 1);
+  const rawSocialFrontier = world.socialFrontierRank ?? percentile(world.nodes.map((n) => n.theoryIndex), 0.95);
+  const exposureFrontier = world.exposureFrontierRank ?? Math.min(world.frontier ?? world.hiddenIndex, rawSocialFrontier + PARADIGM_JUMP * 2);
+  const validatedCeiling = cognitiveCeilingFromExposure(exposureFrontier);
+  const validatedNodes = world.nodes.filter((n) => n.theoryIndex <= validatedCeiling && n.confidence >= 0.45);
+  const socialFrontier = validatedNodes.length
+    ? percentile(validatedNodes.map((n) => n.theoryIndex), 0.95)
+    : Math.min(rawSocialFrontier, validatedCeiling);
+  const frontierGap = clamp((world.hiddenIndex - socialFrontier) / (PHASES * 2), 0, 1);
+  const speculativeOrder = orderOf(world.nodes.reduce((max, n) => Math.max(max, n.theoryIndex), 0));
+  const highestStableOrder = orderOf(socialFrontier);
+  const outlierRate = world.nodes.filter((n) => n.theoryIndex > validatedCeiling).length / total;
+  const orderSkylineCounts = new Array(ORDERS).fill(0);
+  world.nodes.forEach((node) => {
+    orderSkylineCounts[orderOf(node.theoryIndex)] += 1;
+  });
+  const orderSkyline = orderSkylineCounts.map((count) => count / total);
+  return {
+    predictionAccuracy: clamp(predictionAccuracy, 0, 1),
+    active,
+    avgRep,
+    polarization,
+    scope,
+    depth,
+    meanDepth: indexDepth(meanIndex),
+    frontierDepth: indexDepth(world.hiddenIndex),
+    anomaly: clamp(anomaly, 0, 1),
+    confusionLoad: clamp(confusionLoad, 0, 1),
+    translationRate: clamp(translationRate, 0, 1),
+    learningVelocity: clamp(learningVelocity, 0, 1),
+    frontierGap,
+    changedCellsRate: clamp(changedCellsRate, 0, 1),
+    avgDeltaPerChanged,
+    highestStableOrder,
+    speculativeOrder,
+    outlierRate: clamp(outlierRate, 0, 1),
+    validatedCeiling,
+    socialFrontier,
+    exposureFrontier,
+    orderSkyline,
+  };
 }
 
 function applyIntervention(world, kind, targetId) {
@@ -789,9 +1125,10 @@ function applyIntervention(world, kind, targetId) {
   const node = nodes[targetId ?? Math.floor(world.rng() * nodes.length)];
   if (!node) return world;
   if (kind === 'seedTrue') {
-    node.belief = world.truth === 1 ? 2 : -2;
-    node.message = world.truth === 1 ? 1 : -1;
-    node.action = actionFromBelief(node.belief);
+    node.theoryIndex = world.hiddenIndex;
+    node.confidence = 0.72;
+    node.message = 1;
+    node.action = world.hiddenIndex;
     node.energy = 9;
     node.reputation = clamp(node.reputation + 1, 0, 9);
   }
@@ -799,25 +1136,28 @@ function applyIntervention(world, kind, targetId) {
     node.type = 'checker';
     node.checked = true;
     node.reputation = 7;
-    node.belief = world.truth === 1 ? 2 : -2;
-    node.message = world.truth === 1 ? 1 : -1;
-    node.action = actionFromBelief(node.belief);
+    node.theoryIndex = world.hiddenIndex;
+    node.confidence = 0.78;
+    node.message = 1;
+    node.action = world.hiddenIndex;
   }
   if (kind === 'bot') {
     node.type = 'bot';
     node.reputation = 5;
     node.energy = 9;
-    node.belief = world.truth === 1 ? -2 : 2;
-    node.message = world.truth === 1 ? -1 : 1;
-    node.action = actionFromBelief(node.belief);
+    node.theoryIndex = normalizeIndex(world.hiddenIndex - 4000);
+    node.confidence = 0.76;
+    node.message = -1;
+    node.action = node.theoryIndex;
   }
   if (kind === 'agitator') {
     node.type = 'agitator';
     node.reputation = 4;
     node.energy = 9;
-    node.belief = node.belief >= 0 ? 2 : -2;
-    node.message = sign(node.belief);
-    node.action = actionFromBelief(node.belief);
+    node.theoryIndex = node.theoryIndex >= world.hiddenIndex ? 0 : MAX_THEORY_INDEX;
+    node.confidence = 0.75;
+    node.message = node.theoryIndex > world.hiddenIndex ? 1 : -1;
+    node.action = node.theoryIndex;
   }
   return {
     ...world,
@@ -855,8 +1195,11 @@ const INTERVENTIONS = {
   agitator: { icon: Radio, cost: 1 },
 };
 
-function CellCanvas({ world, selected, onSelect }) {
+function CellCanvas({
+  world, selected, onSelect, camera, onCameraChange,
+}) {
   const canvasRef = useRef(null);
+  const dragRef = useRef(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -869,51 +1212,143 @@ function CellCanvas({ world, selected, onSelect }) {
     canvas.style.height = `${heightPx}px`;
     const ctx = canvas.getContext('2d');
     ctx.scale(dpr, dpr);
-    const cell = world.cellSize;
+    const cell = Math.max(1.4, world.cellSize * camera.zoom);
     ctx.fillStyle = '#101316';
     ctx.fillRect(0, 0, widthPx, heightPx);
 
-    world.nodes.forEach((node) => {
-      const palette = {
-        '-2': '#b93848',
-        '-1': '#df8376',
-        0: '#d9d6c8',
-        1: '#6ab8a5',
-        2: '#178f78',
-      };
-      ctx.fillStyle = palette[node.belief];
-      ctx.fillRect(node.x * cell + 0.5, node.y * cell + 0.5, cell - 1, cell - 1);
-      if (node.message !== 0) {
-        ctx.fillStyle = node.message > 0 ? '#e9fff7' : '#fff1ef';
-        ctx.globalAlpha = 0.75;
-        ctx.beginPath();
-        ctx.arc(node.x * cell + cell * 0.5, node.y * cell + cell * 0.5, Math.max(1.2, cell * 0.16), 0, Math.PI * 2);
-        ctx.fill();
+    const minX = clamp(Math.floor(camera.x), 0, world.width - 1);
+    const minY = clamp(Math.floor(camera.y), 0, world.height - 1);
+    const maxX = clamp(Math.ceil(camera.x + widthPx / cell), 0, world.width - 1);
+    const maxY = clamp(Math.ceil(camera.y + heightPx / cell), 0, world.height - 1);
+    const renderDetail = cell >= 12 ? 'full-detail' : cell >= 6 ? 'cell-fill' : 'coarse';
+    const renderCeiling = cognitiveCeilingFromExposure(world.exposureFrontierRank ?? world.hiddenIndex);
+
+    for (let y = minY; y <= maxY; y += 1) {
+      for (let x = minX; x <= maxX; x += 1) {
+        const node = world.nodes[idx(x, y, world.width)];
+        if (!node) continue;
+        const sx = (node.x - camera.x) * cell;
+        const sy = (node.y - camera.y) * cell;
+        if (sx + cell < 0 || sy + cell < 0 || sx > widthPx || sy > heightPx) continue;
+        const validatedIndex = Math.min(node.theoryIndex, renderCeiling);
+        const visibleIndex = visualIndex(validatedIndex);
+        const baseColor = indexToColor(visibleIndex);
+        const brightness = 0.52 + node.confidence * 0.58;
+        ctx.fillStyle = baseColor;
+        ctx.globalAlpha = brightness;
+        const fillInset = cell >= 6 ? 0.5 : 0;
+        ctx.fillRect(sx + fillInset, sy + fillInset, Math.max(1, cell - fillInset * 2), Math.max(1, cell - fillInset * 2));
         ctx.globalAlpha = 1;
+        if (renderDetail === 'full-detail' && visibleIndex > 0 && cell >= 8 && orderOf(validatedIndex) < 64) {
+          ctx.fillStyle = indexToColor(Math.max(0, visibleIndex - Math.floor(MAX_THEORY_INDEX / VISUAL_BANDS)));
+          ctx.globalAlpha = 0.72;
+          ctx.beginPath();
+          ctx.arc(sx + cell * 0.5, sy + cell * 0.5, Math.max(1, cell * 0.14), 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+        if (renderDetail === 'full-detail' && node.message !== 0 && cell >= 8 && orderOf(validatedIndex) < 64) {
+          ctx.fillStyle = node.message > 0 ? '#f3fbff' : '#ffe7e1';
+          ctx.globalAlpha = 0.75;
+          ctx.beginPath();
+          ctx.arc(sx + cell * 0.5, sy + cell * 0.5, Math.max(1.2, cell * 0.16), 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+        if (renderDetail === 'full-detail' && node.productiveSignal > 0.55 && cell >= 7 && orderOf(validatedIndex) < 64) {
+          ctx.strokeStyle = indexToColor(Math.min(MAX_THEORY_INDEX, visibleIndex + Math.floor(MAX_THEORY_INDEX / VISUAL_BANDS)));
+          ctx.lineWidth = Math.max(1, cell * 0.09);
+          ctx.strokeRect(sx + 1.5, sy + 1.5, cell - 3, cell - 3);
+        } else if (renderDetail === 'full-detail' && node.confusionMemory > 1.4 && cell >= 7 && orderOf(validatedIndex) < 64) {
+          ctx.strokeStyle = 'rgba(70,70,70,.55)';
+          ctx.lineWidth = Math.max(1, cell * 0.08);
+          ctx.strokeRect(sx + 2, sy + 2, cell - 4, cell - 4);
+        }
+        if (renderDetail === 'full-detail' && (node.reputation >= 6 || node.type === 'checker' || node.type === 'bot') && cell >= 9 && orderOf(validatedIndex) < 64) {
+          ctx.strokeStyle = node.type === 'checker' ? '#f1c84c' : node.type === 'bot' ? '#7b5cf0' : 'rgba(255,255,255,.7)';
+          ctx.lineWidth = Math.max(1, cell * 0.12);
+          ctx.strokeRect(sx + 1, sy + 1, cell - 2, cell - 2);
+        }
       }
-      if (node.reputation >= 6 || node.type === 'checker' || node.type === 'bot') {
-        ctx.strokeStyle = node.type === 'checker' ? '#f1c84c' : node.type === 'bot' ? '#7b5cf0' : 'rgba(255,255,255,.7)';
-        ctx.lineWidth = Math.max(1, cell * 0.12);
-        ctx.strokeRect(node.x * cell + 1, node.y * cell + 1, cell - 2, cell - 2);
-      }
-    });
+    }
 
     if (selected !== null) {
       const node = world.nodes[selected];
+      const sx = (node.x - camera.x) * cell;
+      const sy = (node.y - camera.y) * cell;
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 3;
-      ctx.strokeRect(node.x * cell + 1.5, node.y * cell + 1.5, cell - 3, cell - 3);
+      ctx.strokeRect(sx + 1.5, sy + 1.5, cell - 3, cell - 3);
     }
-  }, [world, selected]);
+  }, [world, selected, camera]);
 
   function handleClick(event) {
     const rect = event.currentTarget.getBoundingClientRect();
-    const x = Math.floor(((event.clientX - rect.left) / rect.width) * world.width);
-    const y = Math.floor(((event.clientY - rect.top) / rect.height) * world.height);
+    const cell = Math.max(1.4, world.cellSize * camera.zoom);
+    const x = Math.floor(camera.x + (event.clientX - rect.left) / cell);
+    const y = Math.floor(camera.y + (event.clientY - rect.top) / cell);
     onSelect(idx(clamp(x, 0, world.width - 1), clamp(y, 0, world.height - 1), world.width));
   }
 
-  return <canvas className="world-canvas" ref={canvasRef} onClick={handleClick} aria-label="信息传播元胞地图" />;
+  function handlePointerDown(event) {
+    dragRef.current = { x: event.clientX, y: event.clientY };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function handlePointerMove(event) {
+    if (!dragRef.current) return;
+    const prev = dragRef.current;
+    const dx = event.clientX - prev.x;
+    const dy = event.clientY - prev.y;
+    dragRef.current = { x: event.clientX, y: event.clientY };
+    const next = {
+      ...camera,
+      x: clamp(camera.x - dx / Math.max(0.1, camera.zoom * world.cellSize), 0, world.width - 1),
+      y: clamp(camera.y - dy / Math.max(0.1, camera.zoom * world.cellSize), 0, world.height - 1),
+    };
+    onCameraChange(next);
+  }
+
+  function handlePointerUp() {
+    dragRef.current = null;
+  }
+
+  function handleWheel(event) {
+    event.preventDefault();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const sx = event.clientX - rect.left;
+    const sy = event.clientY - rect.top;
+    const before = {
+      x: camera.x + sx / Math.max(1.4, world.cellSize * camera.zoom),
+      y: camera.y + sy / Math.max(1.4, world.cellSize * camera.zoom),
+    };
+    const factor = event.deltaY < 0 ? 1.12 : 0.89;
+    const zoom = clamp(camera.zoom * factor, 0.3, 8);
+    const cell = Math.max(1.4, world.cellSize * zoom);
+    const after = {
+      x: before.x - sx / cell,
+      y: before.y - sy / cell,
+    };
+    onCameraChange({
+      zoom,
+      x: clamp(after.x, 0, world.width - 1),
+      y: clamp(after.y, 0, world.height - 1),
+    });
+  }
+
+  return (
+    <canvas
+      className="world-canvas"
+      ref={canvasRef}
+      onClick={handleClick}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      onWheel={handleWheel}
+      aria-label="信息传播元胞地图"
+    />
+  );
 }
 
 function Meter({ label, value, tone = 'green' }) {
@@ -930,9 +1365,11 @@ function Meter({ label, value, tone = 'green' }) {
   );
 }
 
-function ToggleButton({ active, icon: Icon, children, onClick }) {
+function ToggleButton({
+  active, icon: Icon, children, onClick, title,
+}) {
   return (
-    <button className={`toggle ${active ? 'active' : ''}`} onClick={onClick} type="button">
+    <button className={`toggle ${active ? 'active' : ''}`} onClick={onClick} type="button" title={title || children}>
       <Icon size={17} />
       <span>{children}</span>
     </button>
@@ -1031,10 +1468,17 @@ function App() {
   const [hideControls, setHideControls] = useState(false);
   const [scenario, setScenario] = useState('scarce');
   const [dimensions, setDimensions] = useState(() => viewportGrid());
-  const [world, setWorld] = useState(() => createWorld(Date.now(), 'scarce', viewportGrid()));
+  const [worldView, setWorldView] = useState(() => createWorld(Date.now(), 'scarce', viewportGrid()));
+  const worldRef = useRef(worldView);
+  const runtimeRef = useRef(null);
+  const lastUiSyncRef = useRef(Date.now());
+  const [backend, setBackend] = useState('canvas2d');
+  const [actualTimeScale, setActualTimeScale] = useState(0);
   const [running, setRunning] = useState(false);
   const [speed, setSpeed] = useState(290);
+  const [timeScale, setTimeScale] = useState(1);
   const [selected, setSelected] = useState(null);
+  const [camera, setCamera] = useState({ x: 0, y: 0, zoom: 1 });
   const [budget, setBudget] = useState(9);
   const [options, setOptions] = useState({
     showReputation: true,
@@ -1044,11 +1488,31 @@ function App() {
     factCheck: false,
   });
 
-  const metrics = useMemo(() => getMetrics(world), [world]);
-  const selectedNode = selected === null ? null : world.nodes[selected];
+  const metrics = useMemo(() => getMetrics(worldView), [worldView]);
+  const selectedNode = selected === null ? null : worldView.nodes[selected];
   const copy = COPY[locale];
-  const eventText = getEventText(world.event, copy);
+  const eventText = getEventText(worldView.event, copy);
   const controlsToggleTitle = hideControls ? 'Show controls' : 'Hide controls';
+  const orderBands = useMemo(() => {
+    const groupSize = 4;
+    const bands = [];
+    for (let i = 0; i < ORDERS; i += groupSize) {
+      const value = metrics.orderSkyline.slice(i, i + groupSize).reduce((sum, current) => sum + current, 0);
+      bands.push({ label: `${i}-${i + groupSize - 1}`, value });
+    }
+    return bands;
+  }, [metrics.orderSkyline]);
+
+  useEffect(() => {
+    const runtime = new SimulationRuntime({
+      initialWorld: worldRef.current,
+      stepWorld,
+      getMetrics,
+      backend: 'auto',
+    });
+    runtimeRef.current = runtime;
+    setBackend(runtime.kind);
+  }, []);
 
   useEffect(() => {
     if (freezeWorldResize) return undefined;
@@ -1062,7 +1526,10 @@ function App() {
         const shouldRebuildWorld = widthChanged || heightDelta >= 4;
         if (!shouldRebuildWorld) return;
         setDimensions(next);
-        setWorld(createWorld(Date.now(), scenario, next));
+        const rebuilt = createWorld(Date.now(), scenario, next);
+        worldRef.current = rebuilt;
+        runtimeRef.current?.setWorld(rebuilt);
+        setWorldView(rebuilt);
         setSelected(null);
       }, 180);
     }
@@ -1076,31 +1543,78 @@ function App() {
   useEffect(() => {
     if (!running) return undefined;
     const id = setInterval(() => {
-      setWorld((current) => stepWorld(current, options, scenario));
+      runtimeRef.current?.setControls({
+        timeScale,
+        options,
+        scenario,
+        budgetMs: timeScale >= 64 ? 12 : 6,
+      });
+      const tickResult = runtimeRef.current
+        ? runtimeRef.current.tick()
+        : { world: stepWorld(worldRef.current, options, scenario), actualSteps: 1 };
+      worldRef.current = tickResult.world;
+      setActualTimeScale(tickResult.actualSteps);
+      if (Date.now() - lastUiSyncRef.current >= UI_SYNC_INTERVAL_MS) {
+        lastUiSyncRef.current = Date.now();
+        setWorldView(tickResult.world);
+      }
     }, speed);
     return () => clearInterval(id);
-  }, [running, speed, options, scenario]);
+  }, [running, speed, timeScale, options, scenario]);
+
+  useEffect(() => {
+    if (running) return;
+    setWorldView(worldRef.current);
+  }, [running]);
 
   function reset(nextScenario = scenario) {
     setScenario(nextScenario);
-    setWorld(createWorld(Date.now(), nextScenario, dimensions));
+    const nextWorld = createWorld(Date.now(), nextScenario, dimensions);
+    worldRef.current = nextWorld;
+    runtimeRef.current?.setWorld(nextWorld);
+    setWorldView(nextWorld);
     setRunning(false);
     setSelected(null);
+    setCamera({ x: 0, y: 0, zoom: 1 });
     setBudget(9);
+    lastUiSyncRef.current = Date.now();
   }
 
   function intervene(kind) {
     const item = INTERVENTIONS[kind];
     if (budget < item.cost) return;
     setBudget((b) => b - item.cost);
-    setWorld((current) => applyIntervention(current, kind, selected));
+    const nextWorld = applyIntervention(worldRef.current, kind, selected);
+    worldRef.current = nextWorld;
+    runtimeRef.current?.setWorld(nextWorld);
+    setWorldView(nextWorld);
   }
 
-  const score = Math.round((metrics.truthAligned * 0.55 + (1 - metrics.polarization) * 0.3 + metrics.active * 0.15) * 100);
+  function fastForwardToLift(maxTicks = 5000) {
+    let next = worldRef.current;
+    const initialOrder = orderOf(next.socialFrontierRank ?? next.hiddenIndex);
+    const initialParadigm = next.paradigmShiftCount;
+    for (let i = 0; i < maxTicks; i += 1) {
+      next = stepWorld(next, options, scenario);
+      const nextOrder = orderOf(next.socialFrontierRank ?? next.hiddenIndex);
+      if (next.paradigmShiftCount > initialParadigm || nextOrder > initialOrder) break;
+    }
+    worldRef.current = next;
+    runtimeRef.current?.setWorld(next);
+    setWorldView(next);
+    lastUiSyncRef.current = Date.now();
+  }
+
+  let diagnosticState = 'Learning';
+  if (metrics.translationRate < 0.01 && metrics.anomaly > 0.15) diagnosticState = 'Translation stalled';
+  else if (metrics.learningVelocity < 0.01 && metrics.active > 0.1) diagnosticState = 'Discursive stagnation';
+  else if (metrics.confusionLoad > 0.45) diagnosticState = 'Overwhelmed';
+
+  const score = Math.round((metrics.predictionAccuracy * 0.45 + metrics.scope * 0.25 + metrics.depth * 0.2 + (1 - metrics.anomaly) * 0.1) * 100);
 
   return (
     <main className="app-shell">
-      <CellCanvas world={world} selected={selected} onSelect={setSelected} />
+      <CellCanvas world={worldView} selected={selected} onSelect={setSelected} camera={camera} onCameraChange={setCamera} />
       <button
         className="icon-button ui-toggle-button"
         onClick={() => setHideControls((value) => !value)}
@@ -1127,6 +1641,12 @@ function App() {
             <section className="panel-block compact">
               <label htmlFor="speed">{copy.sections.speed}</label>
               <input id="speed" type="range" min="60" max="520" step="20" value={580 - speed} onChange={(e) => setSpeed(580 - Number(e.target.value))} />
+              <label htmlFor="timescale">Time scale</label>
+              <select id="timescale" value={timeScale} onChange={(e) => setTimeScale(Number(e.target.value))}>
+                {TIME_SCALES.map((value) => (
+                  <option key={value} value={value}>{value}×</option>
+                ))}
+              </select>
             </section>
 
             <section className="panel-block node-card">
@@ -1138,11 +1658,11 @@ function App() {
                 <div className="node-grid">
                   <span>{copy.node.coord}</span><strong>{selectedNode.x + 1}, {selectedNode.y + 1}</strong>
                   <span>{copy.node.type}</span><strong>{copy.types[selectedNode.type]}</strong>
-                  <span>{copy.node.belief}</span><strong>{selectedNode.belief}</strong>
+                  <span>{copy.node.belief}</span><strong>S^{orderOf(selectedNode.theoryIndex)} · φ{phaseOf(selectedNode.theoryIndex)}</strong>
                   <span>{copy.node.message}</span><strong>{selectedNode.message}</strong>
-                  <span>{copy.node.action}</span><strong>{selectedNode.action ?? 'undecided'}</strong>
+                  <span>{copy.node.action}</span><strong>{Math.round(selectedNode.confidence * 100)}%</strong>
                   <span>{copy.node.reputation}</span><strong>{selectedNode.reputation}</strong>
-                  <span>{copy.node.energy}</span><strong>{selectedNode.energy}</strong>
+                  <span>{copy.node.energy}</span><strong>{selectedNode.energy} / A:{selectedNode.anomalyMemory.toFixed(1)} / T:{(selectedNode.translation || 0).toFixed(1)}</strong>
                 </div>
               ) : (
                 <p className="hint">{copy.node.hint}</p>
@@ -1177,8 +1697,16 @@ function App() {
                 <button className="icon-button primary" onClick={() => setRunning((v) => !v)} type="button" title={running ? copy.meta.pause : copy.meta.run}>
                   {running ? <Pause size={19} /> : <Play size={19} />}
                 </button>
-                <button className="icon-button" onClick={() => setWorld((current) => stepWorld(current, options, scenario))} type="button" title={copy.meta.step}>
+                <button className="icon-button" onClick={() => {
+                  const next = stepWorld(worldRef.current, options, scenario);
+                  worldRef.current = next;
+                  runtimeRef.current?.setWorld(next);
+                  setWorldView(next);
+                }} type="button" title={copy.meta.step}>
                   <FastForward size={18} />
+                </button>
+                <button className="icon-button" onClick={() => fastForwardToLift()} type="button" title="Fast-forward to next lift event">
+                  <CheckCircle2 size={18} />
                 </button>
                 <button className="icon-button" onClick={() => reset()} type="button" title={copy.meta.reset}>
                   <RefreshCcw size={18} />
@@ -1189,11 +1717,11 @@ function App() {
             <div className="truth-strip">
               <div>
                 <Target size={18} />
-                <span>{copy.strip.truth} {world.truth}</span>
+                <span>{copy.strip.truth} S^{orderOf(worldView.hiddenIndex)} · φ{phaseOf(worldView.hiddenIndex)}</span>
               </div>
               <div>
                 <Activity size={18} />
-                <span>{copy.strip.tick} {world.tick}</span>
+                <span>{copy.strip.tick} {worldView.tick} · H:{orderOf(worldView.hiddenIndex)} / S:{orderOf(metrics.socialFrontier)} / E:{orderOf(metrics.exposureFrontier)} · C:{orderOf(metrics.validatedCeiling)} · {actualTimeScale}/{timeScale}× · {backend} · {diagnosticState}</span>
               </div>
               <div>
                 <Zap size={18} />
@@ -1202,12 +1730,11 @@ function App() {
             </div>
 
             <div className="legend">
-              <span><i className="c red" />{copy.legend[0]}</span>
-              <span><i className="c pink" />{copy.legend[1]}</span>
-              <span><i className="c neutral" />{copy.legend[2]}</span>
-              <span><i className="c mint" />{copy.legend[3]}</span>
-              <span><i className="c green" />{copy.legend[4]}</span>
-              <span><i className="ring" />{copy.legend[5]}</span>
+              <span><i className="c neutral" />低解释深度</span>
+              <span><i className="c mint" />亮度单调上升</span>
+              <span><i className="c purple" />色相螺旋绕行</span>
+              <span><i className="c gold" />高解释深度</span>
+              <span><i className="ring" />中心点=上一层近似</span>
             </div>
           </section>
 
@@ -1217,13 +1744,34 @@ function App() {
             <Brain size={18} />
             <h2>{copy.status.title}</h2>
           </div>
-          <Meter label={copy.status.truth} value={metrics.truthAligned} />
-          <Meter label={copy.status.active} value={metrics.active} tone="yellow" />
-          <Meter label={copy.status.polar} value={metrics.polarization} tone="red" />
+          <Meter label="Prediction accuracy" value={metrics.predictionAccuracy} />
+          <Meter label="Learning velocity" value={metrics.learningVelocity} tone="yellow" />
+          <Meter label="Anomaly pressure" value={metrics.anomaly} tone="red" />
+          <Meter label="Confusion load" value={metrics.confusionLoad} tone="red" />
+          <Meter label="Translation rate" value={metrics.translationRate} tone="yellow" />
+          <Meter label="Frontier gap" value={metrics.frontierGap} tone="red" />
+          <div className="ascent-bar">
+            <div className="ascent-gradient" />
+            <span className="ascent-marker society" style={{ left: `${metrics.meanDepth * 100}%` }} />
+            <span className="ascent-marker frontier" style={{ left: `${metrics.frontierDepth * 100}%` }} />
+          </div>
           <div className="split-stat">
-            <span>{copy.status.support0}: {Math.round(metrics.negative * 100)}%</span>
-            <span>{copy.status.support1}: {Math.round(metrics.positive * 100)}%</span>
-            <span>Undecided: {Math.round(metrics.undecided * 100)}%</span>
+            <span>Active speech: {Math.round(metrics.active * 100)}%</span>
+            <span>Social p95: S^{metrics.highestStableOrder} / Speculative max: S^{metrics.speculativeOrder}</span>
+            <span>Outliers: {Math.round(metrics.outlierRate * 100)}%</span>
+            <span>Paradigm shifts: {worldView.paradigmShiftCount}</span>
+          </div>
+          <div className="split-stat">
+            <span>Changed cells: {Math.round(metrics.changedCellsRate * 100)}%</span>
+            <span>Avg delta/chg: {metrics.avgDeltaPerChanged.toFixed(1)} phase</span>
+          </div>
+          <div className="order-skyline">
+            {orderBands.map((band) => (
+              <div key={band.label} className="skyline-row" title={`Order band ${band.label}`}>
+                <span>{band.label}</span>
+                <i style={{ width: `${Math.max(2, band.value * 100)}%` }} />
+              </div>
+            ))}
           </div>
           <p className="event-line">{eventText}</p>
         </section>
@@ -1248,19 +1796,19 @@ function App() {
             <h2>{copy.sections.mechanisms}</h2>
           </div>
           <div className="toggle-grid">
-            <ToggleButton active={options.showReputation} icon={options.showReputation ? Eye : EyeOff} onClick={() => setOptions((o) => ({ ...o, showReputation: !o.showReputation }))}>
+            <ToggleButton active={options.showReputation} icon={options.showReputation ? Eye : EyeOff} title={copy.mechanisms.showReputation} onClick={() => setOptions((o) => ({ ...o, showReputation: !o.showReputation }))}>
               {copy.mechanisms.showReputation}
             </ToggleButton>
-            <ToggleButton active={options.hotRanking} icon={Zap} onClick={() => setOptions((o) => ({ ...o, hotRanking: !o.hotRanking }))}>
+            <ToggleButton active={options.hotRanking} icon={Zap} title={copy.mechanisms.hotRanking} onClick={() => setOptions((o) => ({ ...o, hotRanking: !o.hotRanking }))}>
               {copy.mechanisms.hotRanking}
             </ToggleButton>
-            <ToggleButton active={options.crossCommunity} icon={Network} onClick={() => setOptions((o) => ({ ...o, crossCommunity: !o.crossCommunity }))}>
+            <ToggleButton active={options.crossCommunity} icon={Network} title={copy.mechanisms.crossCommunity} onClick={() => setOptions((o) => ({ ...o, crossCommunity: !o.crossCommunity }))}>
               {copy.mechanisms.crossCommunity}
             </ToggleButton>
-            <ToggleButton active={options.anonymous} icon={EyeOff} onClick={() => setOptions((o) => ({ ...o, anonymous: !o.anonymous }))}>
+            <ToggleButton active={options.anonymous} icon={EyeOff} title={copy.mechanisms.anonymous} onClick={() => setOptions((o) => ({ ...o, anonymous: !o.anonymous }))}>
               {copy.mechanisms.anonymous}
             </ToggleButton>
-            <ToggleButton active={options.factCheck} icon={CheckCircle2} onClick={() => setOptions((o) => ({ ...o, factCheck: !o.factCheck }))}>
+            <ToggleButton active={options.factCheck} icon={CheckCircle2} title={copy.mechanisms.factCheck} onClick={() => setOptions((o) => ({ ...o, factCheck: !o.factCheck }))}>
               {copy.mechanisms.factCheck}
             </ToggleButton>
           </div>
@@ -1276,14 +1824,14 @@ function App() {
             {Object.entries(INTERVENTIONS).map(([key, item]) => {
               const Icon = item.icon;
               return (
-                <button key={key} disabled={budget < item.cost} onClick={() => intervene(key)} type="button">
+                <button key={key} disabled={budget < item.cost} onClick={() => intervene(key)} type="button" title={copy.interventions[key]}>
                   <Icon size={17} />
                   <span>{copy.interventions[key]}</span>
                   <small>{item.cost}</small>
                 </button>
               );
             })}
-            <button disabled={budget < 2} onClick={() => { setBudget((b) => b - 2); setWorld((current) => addBridge(current)); }} type="button">
+            <button disabled={budget < 2} onClick={() => { setBudget((b) => b - 2); setWorld((current) => addBridge(current)); }} type="button" title={copy.interventions.bridgeEdge}>
               <Network size={17} />
               <span>{copy.interventions.bridgeEdge}</span>
               <small>2</small>

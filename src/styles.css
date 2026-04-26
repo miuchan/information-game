@@ -329,8 +329,10 @@ h3 {
 
 .red { background: #b93848; }
 .pink { background: #df8376; }
-.neutral { background: #d9d6c8; }
-.mint { background: #6ab8a5; }
+.neutral { background: #000000; border: 1px solid rgba(255,255,255,.25); }
+.mint { background: linear-gradient(90deg, #001122, #22ccaa); }
+.purple { background: linear-gradient(90deg, #3344ff, #ff33aa); }
+.gold { background: #ffffff; border: 1px solid rgba(0,0,0,.35); }
 .green { background: #178f78; }
 .ring {
   border: 2px solid #f1c84c;
@@ -357,6 +359,39 @@ h3 {
 
 .meter {
   margin-top: 11px;
+}
+
+.ascent-bar {
+  margin-top: 12px;
+  position: relative;
+}
+
+.ascent-gradient {
+  background: linear-gradient(90deg, #1a1328 0%, #2950cf 20%, #17a4ad 40%, #8fd744 60%, #e9d46f 80%, #f5f5f8 100%);
+  border: 1px solid rgba(255,255,255,.2);
+  border-radius: 999px;
+  height: 12px;
+}
+
+.ascent-marker {
+  border-radius: 999px;
+  height: 16px;
+  position: absolute;
+  top: -2px;
+  transform: translateX(-50%);
+  width: 3px;
+}
+
+.ascent-marker.society {
+  background: #ffffff;
+}
+
+.ascent-marker.frontier {
+  background: #000000;
+  border: 1px solid rgba(255,255,255,.8);
+  height: 18px;
+  top: -3px;
+  width: 4px;
 }
 
 .meter-label {
@@ -397,6 +432,35 @@ h3 {
   font-size: 12px;
   justify-content: space-between;
   margin-top: 12px;
+}
+
+.order-skyline {
+  border-top: 1px solid rgba(255,255,255,.08);
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+  max-height: 140px;
+  overflow: auto;
+  padding-top: 8px;
+}
+
+.skyline-row {
+  align-items: center;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 42px 1fr;
+}
+
+.skyline-row span {
+  color: #9db0a7;
+  font-size: 11px;
+}
+
+.skyline-row i {
+  background: linear-gradient(90deg, #3a7ed8, #d8a044);
+  border-radius: 999px;
+  display: block;
+  height: 6px;
 }
 
 .event-line,
