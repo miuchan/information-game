@@ -27,7 +27,7 @@ import {
 } from 'lucide-react';
 import { FaGithub } from 'react-icons/fa';
 import './styles.css';
-import { chooseBackend, SimulationRuntime } from './sim/runtime';
+import { SimulationRuntime } from './sim/runtime';
 
 const CELL_SIZE = 18;
 const WORLD_WIDTH = 512;
@@ -1504,12 +1504,13 @@ function App() {
   }, [metrics.orderSkyline]);
 
   useEffect(() => {
-    runtimeRef.current = new SimulationRuntime({
+    const runtime = new SimulationRuntime({
       initialWorld: worldRef.current,
       stepWorld,
       getMetrics,
     });
-    setBackend(chooseBackend());
+    runtimeRef.current = runtime;
+    setBackend(runtime.kind);
   }, []);
 
   useEffect(() => {

@@ -1,69 +1,36 @@
-export const METRICS_INTERVAL_MS = 250;
+import { createCanvas2DBackend } from '../engine/backends/canvas2dBackend';
+import { canUseWebGL2, createWebGL2Backend } from '../engine/backends/webgl2Backend';
+import { canUseWebGPU, createWebGPUBackend } from '../engine/backends/webgpuBackend';
+export { METRICS_INTERVAL_MS, runBudgetedSteps } from './budget';
 
 export function chooseBackend() {
-  if (typeof navigator !== 'undefined' && 'gpu' in navigator) return 'webgpu';
-  if (typeof document !== 'undefined') {
-    const canvas = document.createElement('canvas');
-    if (canvas.getContext('webgl2')) return 'webgl2';
-  }
+  if (canUseWebGPU()) return 'webgpu';
+  if (canUseWebGL2()) return 'webgl2';
   return 'canvas2d';
 }
 
-export function runBudgetedSteps({ targetSteps, budgetMs, step }) {
-  const started = typeof performance !== 'undefined' ? performance.now() : Date.now();
-  let steps = 0;
-  while (steps < targetSteps) {
-    step();
-    steps += 1;
-    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-    if (now - started >= budgetMs) break;
-  }
-  return steps;
+export function createBackend(kind, params) {
+  if (kind === 'webgpu' && canUseWebGPU()) return createWebGPUBackend(params);
+  if (kind === 'webgl2' && canUseWebGL2()) return createWebGL2Backend(params);
+  return createCanvas2DBackend(params);
 }
 
 export class SimulationRuntime {
-  constructor({ initialWorld, stepWorld, getMetrics }) {
-    this.world = initialWorld;
-    this.stepWorld = stepWorld;
-    this.getMetrics = getMetrics;
-    this.controls = {
-      timeScale: 1,
-      options: null,
-      scenario: 'scarce',
-      budgetMs: 6,
-    };
-    this.lastMetricsAt = 0;
+  constructor({ initialWorld, stepWorld, getMetrics, backend = chooseBackend() }) {
+    this.backend = createBackend(backend, { initialWorld, stepWorld, getMetrics });
+    this.backend.init();
+    this.kind = this.backend.kind;
   }
 
   setWorld(world) {
-    this.world = world;
+    this.backend.setWorld(world);
   }
 
   setControls(nextControls) {
-    this.controls = { ...this.controls, ...nextControls };
+    this.backend.setControls(nextControls);
   }
 
   tick() {
-    const { timeScale, options, scenario, budgetMs } = this.controls;
-    const actualSteps = runBudgetedSteps({
-      targetSteps: Math.max(1, Number(timeScale) || 1),
-      budgetMs: Math.max(2, Number(budgetMs) || 6),
-      step: () => {
-        this.world = this.stepWorld(this.world, options, scenario);
-      },
-    });
-
-    const now = Date.now();
-    let metrics = null;
-    if (now - this.lastMetricsAt >= METRICS_INTERVAL_MS) {
-      metrics = this.getMetrics(this.world);
-      this.lastMetricsAt = now;
-    }
-
-    return {
-      world: this.world,
-      metrics,
-      actualSteps,
-    };
+    return this.backend.stepBudgeted();
   }
 }
